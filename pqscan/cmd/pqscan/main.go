@@ -76,6 +76,9 @@ func printHuman(hr report.HostReport) {
 	fmt.Printf("Overall: %s — %s\n", mark(hr.Verdict), hr.Summary)
 	for _, s := range hr.Services {
 		fmt.Printf("\n  %s (port %d): %s\n", s.Service, s.Port, mark(s.Verdict))
+		if s.Banner != "" {
+			fmt.Printf("    %s\n", s.Banner)
+		}
 		if s.TLSVersion != "" {
 			fmt.Printf("    %s, %s\n", s.TLSVersion, s.CipherSuite)
 		}

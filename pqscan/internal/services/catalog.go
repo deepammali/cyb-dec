@@ -12,11 +12,20 @@ import (
 	"pqscan/internal/report"
 )
 
+// Family selects which prober handles a service.
+type Family int
+
+const (
+	FamilyTLS Family = iota // implicit TLS or STARTTLS
+	FamilySSH               // SSH transport (reads KEXINIT)
+)
+
 // Service describes one scannable endpoint type.
 type Service struct {
 	Name     string
 	Port     int
-	Preamble probe.Preamble // nil = implicit TLS; otherwise a STARTTLS negotiation
+	Family   Family
+	Preamble probe.Preamble // TLS family: nil = implicit TLS; else a STARTTLS negotiation
 	Default  bool           // scanned when the user does not choose services
 }
 
@@ -42,6 +51,8 @@ var Catalog = []Service{
 	{Name: "POP3", Port: 110, Preamble: probe.POP3StartTLS},
 	{Name: "FTP", Port: 21, Preamble: probe.FTPStartTLS},
 	{Name: "PostgreSQL", Port: 5432, Preamble: probe.PostgresStartTLS},
+	// SSH family (covers SSH, SFTP, SCP, Git-over-SSH — all run over the SSH transport)
+	{Name: "SSH", Port: 22, Family: FamilySSH},
 }
 
 // Default returns the services scanned when the user does not choose (HTTPS).
@@ -97,7 +108,13 @@ func Scan(host string, svcs []Service, timeout time.Duration) report.HostReport 
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			res := probe.ProbeTLS(s.Name, host, s.Port, host, s.Preamble, timeout)
+			var res probe.ServiceResult
+			switch s.Family {
+			case FamilySSH:
+				res = probe.ProbeSSH(s.Name, host, s.Port, timeout)
+			default:
+				res = probe.ProbeTLS(s.Name, host, s.Port, host, s.Preamble, timeout)
+			}
 			reports[i] = report.ForService(res)
 		}(i, s)
 	}

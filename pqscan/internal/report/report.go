@@ -61,6 +61,9 @@ func ForService(r probe.ServiceResult) ServiceReport {
 
 func briefing(sr ServiceReport) string {
 	r := sr.ServiceResult
+	if r.Kind == "ssh" {
+		return sshBriefing(sr)
+	}
 	switch sr.Verdict {
 	case Ready:
 		var supported []string
@@ -80,6 +83,32 @@ func briefing(sr ServiceReport) string {
 		reason := r.Error
 		if reason == "" {
 			reason = "no usable TLS response"
+		}
+		return fmt.Sprintf("%s on port %d could not be determined: %s.", r.Service, r.Port, reason)
+	}
+}
+
+func sshBriefing(sr ServiceReport) string {
+	r := sr.ServiceResult
+	switch sr.Verdict {
+	case Ready:
+		var supported []string
+		for _, g := range r.Groups {
+			if g.Supported {
+				supported = append(supported, g.Group)
+			}
+		}
+		return fmt.Sprintf(
+			"%s on port %d (%s) advertises post-quantum key exchange (%s), so a recorded session is protected against a future quantum computer.",
+			r.Service, r.Port, orNA(r.Banner), strings.Join(supported, ", "))
+	case NotReady:
+		return fmt.Sprintf(
+			"%s on port %d (%s) advertises no post-quantum key exchange, so a recorded session could be decrypted by a future quantum computer. Remediation: run OpenSSH 9.x+ and enable sntrup761x25519-sha512 or, on 9.9+, mlkem768x25519-sha256.",
+			r.Service, r.Port, orNA(r.Banner))
+	default:
+		reason := r.Error
+		if reason == "" {
+			reason = "no SSH response"
 		}
 		return fmt.Sprintf("%s on port %d could not be determined: %s.", r.Service, r.Port, reason)
 	}

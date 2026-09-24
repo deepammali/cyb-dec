@@ -30,6 +30,10 @@ Exit codes (CLI): `0` ready, `1` not ready, `2` usage error, `3` undetermined.
     `MQTT`, `AMQP`, `MongoDB`, `Redis`, `Syslog-TLS`;
   - STARTTLS: `SMTP` (25), `SMTP-submission` (587), `IMAP` (143), `POP3` (110),
     `FTP` (21), `PostgreSQL` (5432).
+- **SSH** (Phase 3), on port 22 — covers SSH, SFTP, SCP, and Git-over-SSH, which
+  all run over the SSH transport. It reads the server's cleartext `KEXINIT` and
+  reports the post-quantum key-exchange methods it advertises
+  (`mlkem768x25519-sha256`, `sntrup761x25519-sha512`).
 - A **support matrix** across the ML-KEM key-exchange groups: `X25519MLKEM768`,
   `SecP256r1MLKEM768`, `SecP384r1MLKEM1024`, and the deprecated
   `X25519Kyber768Draft00` (best-effort; a negative for the legacy group is not
@@ -38,8 +42,7 @@ Exit codes (CLI): `0` ready, `1` not ready, `2` usage error, `3` undetermined.
   expiry (context — post-quantum certificate signatures are essentially not
   deployed yet, and forged signatures are not an HNDL threat).
 
-Roadmap (see the plan): Phase 3 SSH/SFTP/SCP, Phase 4 QUIC/HTTP-3, Phase 5
-IKEv2/IPsec.
+Roadmap (see the plan): Phase 4 QUIC/HTTP-3, Phase 5 IKEv2/IPsec.
 
 ## How it works
 

@@ -24,12 +24,15 @@ type GroupResult struct {
 	Note          string `json:"note,omitempty"`
 }
 
-// ServiceResult is the per-service readiness report.
+// ServiceResult is the per-service readiness report. Kind is "tls" (default) or
+// "ssh"; a few fields are populated only for one kind.
 type ServiceResult struct {
 	Service       string        `json:"service"`
+	Kind          string        `json:"kind,omitempty"` // "tls" (default) or "ssh"
 	Host          string        `json:"host"`
 	Port          int           `json:"port"`
 	Reachable     bool          `json:"reachable"`
+	Banner        string        `json:"banner,omitempty"` // SSH server identification string
 	TLSVersion    string        `json:"tlsVersion,omitempty"`
 	CipherSuite   string        `json:"cipherSuite,omitempty"`
 	Groups        []GroupResult `json:"groups"`
