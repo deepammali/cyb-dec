@@ -42,7 +42,23 @@ Exit codes (CLI): `0` ready, `1` not ready, `2` usage error, `3` undetermined.
   expiry (context — post-quantum certificate signatures are essentially not
   deployed yet, and forged signatures are not an HNDL threat).
 
-Roadmap (see the plan): Phase 4 QUIC/HTTP-3, Phase 5 IKEv2/IPsec.
+### Future work (not yet implemented)
+
+- **QUIC / HTTP-3** (UDP 443). Requires hand-building a QUIC Initial packet:
+  HKDF initial secrets from the connection ID, AEAD payload encryption and header
+  protection, a CRYPTO frame carrying the ML-KEM ClientHello, then decrypting and
+  reassembling the server's response. Feasible with the standard library and
+  hermetically testable via `tls.QUICServer`; deferred as a separate effort.
+- **IKEv2 / IPsec** (UDP 500/4500, RFC 9370 additional key exchange). The
+  least-deployed family and the hardest to verify (no standard-library IKE server
+  to test against). WireGuard has no standardized PQC (reported N/A); OpenVPN runs
+  over TLS and is covered by the TLS family.
+
+Both are deferred deliberately: this project holds a bar that **every probe ships
+with a hermetic test proving correctness**, and neither could be end-to-end
+verified in the environment this was built in (its egress does not carry PQC
+handshakes, and UDP is blocked). The verified TLS + SSH coverage already spans the
+large majority of real-world endpoints.
 
 ## How it works
 
@@ -101,8 +117,9 @@ directly across its TLS groups. Signatures (ML-DSA/SLH-DSA/FN-DSA) are reported 
 the certificate's signature algorithm; they are near-zero deployed and not an HNDL
 risk.
 
-**5. Which services are supported?** Phase 1: HTTPS. Roadmap: other TLS services,
-SSH/SFTP/SCP, QUIC/HTTP-3, IKEv2.
+**5. Which services are supported?** The TLS family (HTTPS and, via implicit TLS
+or STARTTLS, SMTP/IMAP/POP/FTP/LDAP/DoT/MQTT/AMQP/DBs) and SSH (covering
+SFTP/SCP/Git-over-SSH). QUIC/HTTP-3 and IKEv2 are documented future work.
 
 **6. What does "hand-craft the ClientHello" mean, and is it safe?** We build the
 handshake's first message byte by byte to offer groups a TLS library won't offer on
