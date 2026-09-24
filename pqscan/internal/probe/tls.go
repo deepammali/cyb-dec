@@ -10,6 +10,11 @@ import (
 // DefaultTimeout bounds each probe (dial + handshake round trip).
 const DefaultTimeout = 8 * time.Second
 
+// Preamble upgrades a freshly dialed TCP connection to the point where a TLS
+// ClientHello is expected (a STARTTLS negotiation). nil means implicit TLS: the
+// TLS handshake begins immediately on connect.
+type Preamble func(conn net.Conn, serverName string) error
+
 // GroupResult is the outcome of probing a single named group.
 type GroupResult struct {
 	Group         string `json:"group"`
@@ -36,34 +41,37 @@ type ServiceResult struct {
 	Error         string        `json:"error,omitempty"` // set when a service is undetermined
 }
 
-// ProbeTLS scans one implicit-TLS service (e.g. HTTPS) at host:port. serverName is
-// the SNI to present (usually host). It builds the ML-KEM support matrix via
-// hand-crafted ClientHellos and gathers TLS/cert context via a standard dial.
-func ProbeTLS(service, host string, port int, serverName string, timeout time.Duration) ServiceResult {
+// ProbeTLS scans one TLS service at host:port. serverName is the SNI to present
+// (usually host). pre is the STARTTLS preamble (nil for implicit TLS). It builds
+// the ML-KEM support matrix via hand-crafted ClientHellos and gathers TLS/cert
+// context via a standard handshake.
+func ProbeTLS(service, host string, port int, serverName string, pre Preamble, timeout time.Duration) ServiceResult {
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
 	res := ServiceResult{Service: service, Host: host, Port: port}
 	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
 
-	// TLS/cert context via a standard dial (we scan, so skip verification but keep the cert).
+	// TLS/cert context via a standard handshake (skip verification but keep the cert).
 	reachable := false
-	dialer := &net.Dialer{Timeout: timeout}
-	tconn, err := tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{
-		ServerName:         serverName,
-		InsecureSkipVerify: true,
-		MinVersion:         tls.VersionTLS12,
-	})
-	if err == nil {
-		reachable = true
-		st := tconn.ConnectionState()
-		res.TLSVersion = tlsVersionName(st.Version)
-		res.CipherSuite = tls.CipherSuiteName(st.CipherSuite)
-		if len(st.PeerCertificates) > 0 {
-			c := st.PeerCertificates[0]
-			res.CertSigAlg = c.SignatureAlgorithm.String()
-			res.CertNotAfter = c.NotAfter.UTC().Format("2006-01-02")
-			res.CertSubject = c.Subject.CommonName
+	if raw, err := dialWithPreamble(addr, serverName, pre, timeout); err == nil {
+		tconn := tls.Client(raw, &tls.Config{
+			ServerName:         serverName,
+			InsecureSkipVerify: true,
+			MinVersion:         tls.VersionTLS12,
+		})
+		tconn.SetDeadline(time.Now().Add(timeout))
+		if err := tconn.Handshake(); err == nil {
+			reachable = true
+			st := tconn.ConnectionState()
+			res.TLSVersion = tlsVersionName(st.Version)
+			res.CipherSuite = tls.CipherSuiteName(st.CipherSuite)
+			if len(st.PeerCertificates) > 0 {
+				c := st.PeerCertificates[0]
+				res.CertSigAlg = c.SignatureAlgorithm.String()
+				res.CertNotAfter = c.NotAfter.UTC().Format("2006-01-02")
+				res.CertSubject = c.Subject.CommonName
+			}
 		}
 		tconn.Close()
 	}
@@ -71,10 +79,9 @@ func ProbeTLS(service, host string, port int, serverName string, timeout time.Du
 	// ML-KEM group support matrix via hand-crafted ClientHellos.
 	for _, g := range PQGroups {
 		gr := GroupResult{Group: g.Name, ID: g.ID}
-		supported, derr := probeGroup(addr, serverName, g.ID, timeout)
+		supported, derr := probeGroup(addr, serverName, g.ID, pre, timeout)
 		if derr != nil {
 			if !reachable {
-				// Never connected at all: undetermined for the whole service.
 				res.Error = derr.Error()
 				return res
 			}
@@ -106,10 +113,26 @@ func ProbeTLS(service, host string, port int, serverName string, timeout time.Du
 	return res
 }
 
+// dialWithPreamble opens a TCP connection, applies the STARTTLS preamble if any,
+// and returns the connection positioned for a TLS ClientHello.
+func dialWithPreamble(addr, serverName string, pre Preamble, timeout time.Duration) (net.Conn, error) {
+	conn, err := net.DialTimeout("tcp", addr, timeout)
+	if err != nil {
+		return nil, err
+	}
+	conn.SetDeadline(time.Now().Add(timeout))
+	if pre != nil {
+		if err := pre(conn, serverName); err != nil {
+			conn.Close()
+			return nil, err
+		}
+	}
+	return conn, nil
+}
+
 // probeGroup offers the group under test together with a classical fallback
-// (X25519) and reports whether the server selected the tested group. Selecting the
-// fallback (or any other group) means the server would not use this PQC group.
-func probeGroup(addr, serverName string, group uint16, timeout time.Duration) (bool, error) {
+// (X25519) and reports whether the server selected the tested group.
+func probeGroup(addr, serverName string, group uint16, pre Preamble, timeout time.Duration) (bool, error) {
 	offer := []uint16{group}
 	if group != GroupX25519 {
 		offer = append(offer, GroupX25519)
@@ -118,7 +141,7 @@ func probeGroup(addr, serverName string, group uint16, timeout time.Duration) (b
 	if err != nil {
 		return false, err
 	}
-	conn, err := net.DialTimeout("tcp", addr, timeout)
+	conn, err := dialWithPreamble(addr, serverName, pre, timeout)
 	if err != nil {
 		return false, err
 	}
@@ -136,7 +159,7 @@ func probeGroup(addr, serverName string, group uint16, timeout time.Duration) (b
 			buf = append(buf, tmp[:n]...)
 			if c, perr := parseServerResponse(buf); perr == nil {
 				if c.Alert {
-					return false, nil // handshake_failure: group not supported
+					return false, nil
 				}
 				if c.Found {
 					return c.Selected == group, nil
@@ -150,7 +173,6 @@ func probeGroup(addr, serverName string, group uint16, timeout time.Duration) (b
 			break
 		}
 	}
-	// Best effort on whatever we got.
 	if c, perr := parseServerResponse(buf); perr == nil {
 		if c.Alert {
 			return false, nil

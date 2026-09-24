@@ -21,7 +21,7 @@ import (
 
 func main() {
 	jsonOut := flag.Bool("json", false, "emit JSON")
-	svcList := flag.String("services", "", "comma-separated services to scan (default: all)")
+	svcList := flag.String("services", "", "comma-separated services (e.g. HTTPS,SMTP,IMAP); 'all' for the whole catalog; default: HTTPS")
 	timeout := flag.Duration("timeout", probe.DefaultTimeout, "per-probe timeout")
 	selftest := flag.Bool("selftest", false, "verify the probe engine against a local PQC server and exit")
 	flag.Usage = func() {

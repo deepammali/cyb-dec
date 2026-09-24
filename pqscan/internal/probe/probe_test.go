@@ -101,7 +101,7 @@ func TestCalibrationLive(t *testing.T) {
 	if os.Getenv("PQSCAN_NETTEST") == "" {
 		t.Skip("set PQSCAN_NETTEST=1 to run live calibration")
 	}
-	ok, err := probeGroup("cloudflare.com:443", "cloudflare.com", GroupX25519MLKEM768, 10*time.Second)
+	ok, err := probeGroup("cloudflare.com:443", "cloudflare.com", GroupX25519MLKEM768, nil, 10*time.Second)
 	if err != nil {
 		t.Skipf("cannot reach cloudflare.com: %v", err)
 	}

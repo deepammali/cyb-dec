@@ -106,22 +106,27 @@ func Rollup(host string, svcs []ServiceReport) HostReport {
 			undet++
 		}
 	}
+	determined := ready + notReady
+	undetSuffix := ""
+	if undet > 0 {
+		undetSuffix = fmt.Sprintf(" (%d not reachable)", undet)
+	}
 	switch {
 	case len(svcs) == 0:
 		hr.Verdict = Undetermined
 		hr.Summary = "No services scanned."
-	case ready > 0 && notReady == 0:
-		hr.Verdict = Ready
-		hr.Summary = fmt.Sprintf("%d of %d service(s) quantum-safe.", ready, len(svcs))
-	case ready == 0 && notReady == 0:
+	case determined == 0:
 		hr.Verdict = Undetermined
-		hr.Summary = "No service could be determined."
+		hr.Summary = "No scanned service was reachable."
+	case notReady == 0:
+		hr.Verdict = Ready
+		hr.Summary = fmt.Sprintf("%d reachable service(s) quantum-safe%s.", ready, undetSuffix)
 	case ready == 0:
 		hr.Verdict = NotReady
-		hr.Summary = fmt.Sprintf("%d of %d service(s) not quantum-safe.", notReady, len(svcs))
+		hr.Summary = fmt.Sprintf("%d reachable service(s) not quantum-safe%s.", notReady, undetSuffix)
 	default:
 		hr.Verdict = NotReady
-		hr.Summary = fmt.Sprintf("%d ready, %d not ready, %d undetermined.", ready, notReady, undet)
+		hr.Summary = fmt.Sprintf("%d ready, %d not ready of %d reachable%s.", ready, notReady, determined, undetSuffix)
 	}
 	return hr
 }

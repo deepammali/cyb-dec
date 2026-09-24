@@ -22,9 +22,14 @@ go run ./cmd/pqscan-web --addr :8080
 
 Exit codes (CLI): `0` ready, `1` not ready, `2` usage error, `3` undetermined.
 
-## What it checks (Phase 1)
+## What it checks
 
-- **HTTPS / TLS 1.3 on port 443.**
+- **TLS services** (Phases 1–2), by default **HTTPS/443**; scan more with
+  `--services` (or `--services all`):
+  - implicit TLS: `HTTPS`, `SMTPS`, `IMAPS`, `POP3S`, `FTPS`, `LDAPS`, `DoT`,
+    `MQTT`, `AMQP`, `MongoDB`, `Redis`, `Syslog-TLS`;
+  - STARTTLS: `SMTP` (25), `SMTP-submission` (587), `IMAP` (143), `POP3` (110),
+    `FTP` (21), `PostgreSQL` (5432).
 - A **support matrix** across the ML-KEM key-exchange groups: `X25519MLKEM768`,
   `SecP256r1MLKEM768`, `SecP384r1MLKEM1024`, and the deprecated
   `X25519Kyber768Draft00` (best-effort; a negative for the legacy group is not
@@ -33,9 +38,8 @@ Exit codes (CLI): `0` ready, `1` not ready, `2` usage error, `3` undetermined.
   expiry (context — post-quantum certificate signatures are essentially not
   deployed yet, and forged signatures are not an HNDL threat).
 
-Roadmap (see the plan): Phase 2 other TLS services (SMTP/IMAP/POP/LDAP/FTPS/DoT/
-DBs via STARTTLS or implicit TLS), Phase 3 SSH/SFTP/SCP, Phase 4 QUIC/HTTP-3,
-Phase 5 IKEv2/IPsec.
+Roadmap (see the plan): Phase 3 SSH/SFTP/SCP, Phase 4 QUIC/HTTP-3, Phase 5
+IKEv2/IPsec.
 
 ## How it works
 

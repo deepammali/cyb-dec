@@ -49,7 +49,7 @@ func SelfCalibrate() error {
 		}
 	}()
 
-	ok, err := probeGroup(ln.Addr().String(), "pqscan.local", GroupX25519MLKEM768, 3*time.Second)
+	ok, err := probeGroup(ln.Addr().String(), "pqscan.local", GroupX25519MLKEM768, nil, 3*time.Second)
 	if err != nil {
 		return fmt.Errorf("self-calibration probe error: %w", err)
 	}

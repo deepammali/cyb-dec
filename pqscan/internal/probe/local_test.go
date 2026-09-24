@@ -23,7 +23,7 @@ func TestProbeAgainstLocalPQServer(t *testing.T) {
 	addr := u.Host // 127.0.0.1:port
 
 	// Go's TLS server supports X25519MLKEM768 -> must be detected.
-	ok, err := probeGroup(addr, "example.com", GroupX25519MLKEM768, 5*time.Second)
+	ok, err := probeGroup(addr, "example.com", GroupX25519MLKEM768, nil, 5*time.Second)
 	if err != nil {
 		t.Fatalf("probe X25519MLKEM768: %v", err)
 	}
@@ -33,7 +33,7 @@ func TestProbeAgainstLocalPQServer(t *testing.T) {
 
 	// Go does not implement the P-256/P-384 ML-KEM hybrids -> must read as not supported.
 	for _, g := range []uint16{GroupSecP256r1MLKEM768, GroupSecP384r1MLKEM1024} {
-		ok, err := probeGroup(addr, "example.com", g, 5*time.Second)
+		ok, err := probeGroup(addr, "example.com", g, nil, 5*time.Second)
 		if err != nil {
 			t.Fatalf("probe %s: %v", GroupName(g), err)
 		}

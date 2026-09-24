@@ -1,50 +1,77 @@
 // Package services holds the catalog of scannable services and orchestrates a
-// scan across them. Phase 1 covers implicit-TLS HTTPS; later phases add STARTTLS
-// services, SSH, QUIC, and IKEv2 by extending the catalog and probe families.
+// scan across them. Phase 1 covered implicit-TLS HTTPS; Phase 2 adds the other
+// TLS services (implicit TLS and STARTTLS). Later phases add SSH, QUIC, and IKEv2.
 package services
 
 import (
 	"strings"
+	"sync"
 	"time"
 
 	"pqscan/internal/probe"
 	"pqscan/internal/report"
 )
 
-// Family selects which prober handles a service.
-type Family int
-
-const (
-	FamilyTLSImplicit Family = iota // dial TLS directly (HTTPS, IMAPS, ...)
-	// Reserved for later phases: STARTTLS, SSH, QUIC, IKE.
-)
-
 // Service describes one scannable endpoint type.
 type Service struct {
-	Name   string
-	Port   int
-	Family Family
+	Name     string
+	Port     int
+	Preamble probe.Preamble // nil = implicit TLS; otherwise a STARTTLS negotiation
+	Default  bool           // scanned when the user does not choose services
 }
 
-// Catalog is the built-in service list. Phase 1: HTTPS only.
+// Catalog is the built-in service list (Phase 1 + 2).
 var Catalog = []Service{
-	{Name: "HTTPS", Port: 443, Family: FamilyTLSImplicit},
+	// implicit TLS
+	{Name: "HTTPS", Port: 443, Default: true},
+	{Name: "SMTPS", Port: 465},
+	{Name: "IMAPS", Port: 993},
+	{Name: "POP3S", Port: 995},
+	{Name: "FTPS", Port: 990},
+	{Name: "LDAPS", Port: 636},
+	{Name: "DoT", Port: 853},
+	{Name: "MQTT", Port: 8883},
+	{Name: "AMQP", Port: 5671},
+	{Name: "MongoDB", Port: 27017},
+	{Name: "Redis", Port: 6379},
+	{Name: "Syslog-TLS", Port: 6514},
+	// STARTTLS
+	{Name: "SMTP", Port: 25, Preamble: probe.SMTPStartTLS},
+	{Name: "SMTP-submission", Port: 587, Preamble: probe.SMTPStartTLS},
+	{Name: "IMAP", Port: 143, Preamble: probe.IMAPStartTLS},
+	{Name: "POP3", Port: 110, Preamble: probe.POP3StartTLS},
+	{Name: "FTP", Port: 21, Preamble: probe.FTPStartTLS},
+	{Name: "PostgreSQL", Port: 5432, Preamble: probe.PostgresStartTLS},
 }
 
-// Default returns the services scanned when the user does not choose.
-func Default() []Service { return Catalog }
-
-// Select resolves comma/space separated service names to catalog entries.
-// Unknown names are ignored; an empty selection yields Default().
-func Select(names []string) []Service {
-	if len(names) == 0 {
-		return Default()
+// Default returns the services scanned when the user does not choose (HTTPS).
+func Default() []Service {
+	var out []Service
+	for _, s := range Catalog {
+		if s.Default {
+			out = append(out, s)
+		}
 	}
+	return out
+}
+
+// Select resolves service names to catalog entries. "all" selects the whole
+// catalog; unknown names are ignored; an empty selection yields Default().
+func Select(names []string) []Service {
 	want := map[string]bool{}
 	for _, n := range names {
 		for _, part := range strings.FieldsFunc(n, func(r rune) bool { return r == ',' || r == ' ' }) {
-			want[strings.ToLower(strings.TrimSpace(part))] = true
+			p := strings.ToLower(strings.TrimSpace(part))
+			if p != "" {
+				want[p] = true
+			}
 		}
+	}
+	if len(want) == 0 {
+		return Default()
+	}
+	if want["all"] {
+		return append([]Service(nil), Catalog...)
 	}
 	var out []Service
 	for _, s := range Catalog {
@@ -58,16 +85,22 @@ func Select(names []string) []Service {
 	return out
 }
 
-// Scan probes each service for host and returns the host-level report. The host
-// must already have passed safety.Validate.
+// Scan probes each service for host concurrently and returns the host-level
+// report. The host must already have passed safety.Validate.
 func Scan(host string, svcs []Service, timeout time.Duration) report.HostReport {
-	var reports []report.ServiceReport
-	for _, s := range svcs {
-		switch s.Family {
-		case FamilyTLSImplicit:
-			res := probe.ProbeTLS(s.Name, host, s.Port, host, timeout)
-			reports = append(reports, report.ForService(res))
-		}
+	reports := make([]report.ServiceReport, len(svcs))
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+	for i, s := range svcs {
+		wg.Add(1)
+		go func(i int, s Service) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			res := probe.ProbeTLS(s.Name, host, s.Port, host, s.Preamble, timeout)
+			reports[i] = report.ForService(res)
+		}(i, s)
 	}
+	wg.Wait()
 	return report.Rollup(host, reports)
 }
