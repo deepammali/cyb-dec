@@ -1,0 +1,62 @@
+:root{
+  --bg:#F1F5F6; --surface:#FFFFFF; --surface-2:#E7EEEF;
+  --ink:#101A1F; --ink-soft:#47585F; --line:#D2DCDF;
+  --accent:#0E7C86; --accent-soft:#D6ECEE;
+  --safe:#187A48; --safe-bg:#DCF0E4;
+  --danger:#B0392C; --danger-bg:#F6DFDB;
+  --warn:#8C6008; --warn-bg:#F5E7CC;
+  --sans:'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+  --mono:'IBM Plex Mono',ui-monospace,'SF Mono',Menlo,monospace;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    color-scheme:dark;
+    --bg:#0C1417; --surface:#131F24; --surface-2:#1C2B31;
+    --ink:#E9F0F2; --ink-soft:#9EB1B8; --line:#26383F;
+    --accent:#38B4C0; --accent-soft:#123339;
+    --safe:#54C085; --safe-bg:#123324;
+    --danger:#E88072; --danger-bg:#3A1E1A;
+    --warn:#E1AC4E; --warn-bg:#33280F;
+  }
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.6;-webkit-font-smoothing:antialiased}
+.wrap{max-width:760px;margin:0 auto;padding-inline:20px;padding-block:56px 40px}
+.eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin:0 0 12px}
+h1{font-size:clamp(28px,5.4vw,40px);line-height:1.12;letter-spacing:-.02em;font-weight:700;margin:0 0 14px;text-wrap:balance}
+.lede{font-size:clamp(16px,2.2vw,18px);color:var(--ink-soft);max-width:60ch;margin:0 0 28px}
+form{display:flex;gap:10px;flex-wrap:wrap}
+#host{flex:1 1 240px;min-width:0;font-family:var(--mono);font-size:16px;padding:13px 15px;border:1px solid var(--line);border-radius:10px;background:var(--surface);color:var(--ink)}
+#host:focus{outline:2px solid var(--accent);outline-offset:1px;border-color:var(--accent)}
+button{font-family:var(--sans);font-weight:600;font-size:16px;padding:13px 24px;border:none;border-radius:10px;background:var(--accent);color:#fff;cursor:pointer}
+button:disabled{opacity:.55;cursor:progress}
+.hint{font-size:13px;color:var(--ink-soft);margin:10px 2px 0}
+.status{margin-top:28px;font-family:var(--mono);font-size:14px;color:var(--ink-soft)}
+.status.error{color:var(--danger)}
+section#results{margin-top:28px;display:grid;gap:18px}
+
+.rollup{border:1px solid var(--line);border-left-width:4px;border-radius:12px;padding:18px 20px;background:var(--surface)}
+.rollup h2{margin:0 0 4px;font-size:20px}
+.rollup .sum{margin:0;color:var(--ink-soft);font-size:15px}
+.badge{display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);font-size:12px;font-weight:500;letter-spacing:.06em;text-transform:uppercase;padding:5px 11px;border-radius:999px;margin-bottom:10px}
+.badge::before{content:"";width:9px;height:9px;border-radius:50%}
+.v-ready{background:var(--safe-bg);color:var(--safe)} .v-ready::before{background:var(--safe)}
+.v-not_ready{background:var(--danger-bg);color:var(--danger)} .v-not_ready::before{background:var(--danger)}
+.v-undetermined{background:var(--warn-bg);color:var(--warn)} .v-undetermined::before{background:var(--warn)}
+.b-ready{border-left-color:var(--safe)} .b-not_ready{border-left-color:var(--danger)} .b-undetermined{border-left-color:var(--warn)}
+
+.svc{border:1px solid var(--line);border-radius:12px;padding:18px 20px;background:var(--surface)}
+.svc .head{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap}
+.svc h3{margin:0;font-size:17px}
+.svc .meta{font-family:var(--mono);font-size:12.5px;color:var(--ink-soft);margin:8px 0 0}
+.matrix{list-style:none;padding:0;margin:14px 0 0;display:grid;gap:6px}
+.matrix li{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:13px}
+.pill{font-size:11px;font-weight:600;padding:2px 8px;border-radius:6px;min-width:44px;text-align:center}
+.pill.yes{background:var(--safe-bg);color:var(--safe)}
+.pill.no{background:var(--surface-2);color:var(--ink-soft)}
+.matrix .note{color:var(--ink-soft);font-family:var(--sans);font-size:12px}
+.briefing{margin:14px 0 0;font-size:14.5px;color:var(--ink)}
+footer{margin-top:40px;padding-top:18px;border-top:1px solid var(--line);font-size:12.5px;color:var(--ink-soft)}
+a{color:var(--accent)}

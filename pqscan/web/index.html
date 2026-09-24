@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>pqscan — quantum-safe checker</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="wrap">
+    <header>
+      <p class="eyebrow">pqscan</p>
+      <h1>Is your site quantum-safe?</h1>
+      <p class="lede">Enter a hostname. pqscan runs a real TLS handshake, offers post-quantum
+        key exchange (ML-KEM), and reports whether the server actually uses it — the defense
+        against “harvest now, decrypt later”.</p>
+    </header>
+
+    <form id="scan-form" autocomplete="off">
+      <input id="host" name="host" type="text" inputmode="url" spellcheck="false"
+             placeholder="e.g. cloudflare.com" aria-label="hostname to scan" required>
+      <button id="go" type="submit">Scan</button>
+    </form>
+    <p class="hint">Scans only public endpoints you are entitled to check.</p>
+
+    <section id="status" class="status" hidden></section>
+    <section id="results" hidden></section>
+
+    <footer>
+      <span>Checks ML-KEM key exchange per <a href="https://datatracker.ietf.org/doc/html/rfc8446">RFC&nbsp;8446</a> · <a href="https://doi.org/10.6028/NIST.FIPS.203">FIPS&nbsp;203</a>.</span>
+    </footer>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>
