@@ -44,7 +44,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	host, err := safety.Validate(flag.Arg(0))
+	host, err := safety.NormalizeHost(flag.Arg(0))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(2)

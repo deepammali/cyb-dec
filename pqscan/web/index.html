@@ -20,9 +20,46 @@
     </header>
 
     <form id="scan-form" autocomplete="off">
-      <input id="host" name="host" type="text" inputmode="url" spellcheck="false"
-             placeholder="e.g. cloudflare.com" aria-label="hostname to scan" required>
-      <button id="go" type="submit">Scan</button>
+      <div class="input-row">
+        <input id="host" name="host" type="text" inputmode="url" spellcheck="false"
+               placeholder="e.g. cloudflare.com" aria-label="hostname to scan" required>
+        <button id="go" type="submit">Scan</button>
+      </div>
+
+      <details id="svc-details">
+        <summary>Services <span id="svc-summary">HTTPS</span></summary>
+        <div class="svc-grid">
+          <label class="svc-all"><input type="checkbox" id="svc-all"> <strong>All services</strong></label>
+          <fieldset>
+            <legend>Implicit TLS</legend>
+            <label><input type="checkbox" name="svc" value="HTTPS" checked> HTTPS <small>443</small></label>
+            <label><input type="checkbox" name="svc" value="SMTPS"> SMTPS <small>465</small></label>
+            <label><input type="checkbox" name="svc" value="IMAPS"> IMAPS <small>993</small></label>
+            <label><input type="checkbox" name="svc" value="POP3S"> POP3S <small>995</small></label>
+            <label><input type="checkbox" name="svc" value="FTPS"> FTPS <small>990</small></label>
+            <label><input type="checkbox" name="svc" value="LDAPS"> LDAPS <small>636</small></label>
+            <label><input type="checkbox" name="svc" value="DoT"> DoT <small>853</small></label>
+            <label><input type="checkbox" name="svc" value="MQTT"> MQTT <small>8883</small></label>
+            <label><input type="checkbox" name="svc" value="AMQP"> AMQP <small>5671</small></label>
+            <label><input type="checkbox" name="svc" value="MongoDB"> MongoDB <small>27017</small></label>
+            <label><input type="checkbox" name="svc" value="Redis"> Redis <small>6379</small></label>
+            <label><input type="checkbox" name="svc" value="Syslog-TLS"> Syslog-TLS <small>6514</small></label>
+          </fieldset>
+          <fieldset>
+            <legend>STARTTLS</legend>
+            <label><input type="checkbox" name="svc" value="SMTP"> SMTP <small>25</small></label>
+            <label><input type="checkbox" name="svc" value="SMTP-submission"> SMTP-submission <small>587</small></label>
+            <label><input type="checkbox" name="svc" value="IMAP"> IMAP <small>143</small></label>
+            <label><input type="checkbox" name="svc" value="POP3"> POP3 <small>110</small></label>
+            <label><input type="checkbox" name="svc" value="FTP"> FTP <small>21</small></label>
+            <label><input type="checkbox" name="svc" value="PostgreSQL"> PostgreSQL <small>5432</small></label>
+          </fieldset>
+          <fieldset>
+            <legend>SSH</legend>
+            <label><input type="checkbox" name="svc" value="SSH"> SSH / SFTP / SCP <small>22</small></label>
+          </fieldset>
+        </div>
+      </details>
     </form>
     <p class="hint">Scans only public endpoints you are entitled to check.</p>
 

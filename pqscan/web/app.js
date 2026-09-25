@@ -5,11 +5,32 @@ const hostInput = document.getElementById('host');
 const goBtn = document.getElementById('go');
 const statusEl = document.getElementById('status');
 const resultsEl = document.getElementById('results');
+const svcAllBox = document.getElementById('svc-all');
+const svcSummary = document.getElementById('svc-summary');
+
+function selectedServices() {
+  if (svcAllBox.checked) return ['all'];
+  return Array.from(document.querySelectorAll('input[name="svc"]:checked')).map(el => el.value);
+}
+
+function updateSvcSummary() {
+  if (svcAllBox.checked) { svcSummary.textContent = 'All'; return; }
+  const sel = selectedServices();
+  svcSummary.textContent = sel.length === 0 ? 'none' : sel.length === 1 ? sel[0] : `${sel.length} services`;
+}
+
+svcAllBox.addEventListener('change', () => {
+  document.querySelectorAll('input[name="svc"]').forEach(cb => { cb.disabled = svcAllBox.checked; });
+  updateSvcSummary();
+});
+document.querySelectorAll('input[name="svc"]').forEach(cb => cb.addEventListener('change', updateSvcSummary));
 
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
   const host = hostInput.value.trim();
   if (!host) return;
+
+  const svcs = selectedServices();
 
   resultsEl.hidden = true;
   resultsEl.innerHTML = '';
@@ -19,10 +40,12 @@ form.addEventListener('submit', async (e) => {
   goBtn.disabled = true;
 
   try {
+    const body = { host };
+    if (svcs.length > 0) body.services = svcs;
     const resp = await fetch('/api/scan', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ host }),
+      body: JSON.stringify(body),
     });
     const data = await resp.json();
     if (!resp.ok) {
