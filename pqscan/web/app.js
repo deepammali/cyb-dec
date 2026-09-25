@@ -8,6 +8,8 @@ const resultsEl = document.getElementById('results');
 const svcAllBox = document.getElementById('svc-all');
 const svcSummary = document.getElementById('svc-summary');
 
+let lastRawData = null;
+
 function selectedServices() {
   if (svcAllBox.checked) return ['all'];
   return Array.from(document.querySelectorAll('input[name="svc"]:checked')).map(el => el.value);
@@ -34,6 +36,7 @@ form.addEventListener('submit', async (e) => {
 
   resultsEl.hidden = true;
   resultsEl.innerHTML = '';
+  lastRawData = null;
   statusEl.hidden = false;
   statusEl.className = 'status';
   statusEl.textContent = `Scanning ${host} …`;
@@ -51,6 +54,7 @@ form.addEventListener('submit', async (e) => {
     if (!resp.ok) {
       throw new Error(data && data.error ? data.error : `request failed (${resp.status})`);
     }
+    lastRawData = data;
     statusEl.hidden = true;
     render(data);
   } catch (err) {
@@ -75,34 +79,101 @@ function badge(verdict, label) {
 function render(hr) {
   resultsEl.innerHTML = '';
 
-  const roll = el('div', `rollup b-${hr.verdict}`);
-  roll.innerHTML = badge(hr.verdict, verdictLabel(hr.verdict)) +
+  const ts = new Date().toUTCString().replace(' GMT', ' UTC');
+
+  const roll = document.createElement('div');
+  roll.className = `rollup b-${hr.verdict}`;
+  roll.innerHTML =
+    `<div class="rollup-head">` +
+      badge(hr.verdict, verdictLabel(hr.verdict)) +
+      `<button class="copy-btn" id="copy-json-btn" type="button">Copy JSON</button>` +
+    `</div>` +
     `<h2>${escapeHtml(hr.host)}</h2>` +
-    `<p class="sum">${escapeHtml(hr.summary || '')}</p>`;
+    `<p class="sum">${escapeHtml(hr.summary || '')}</p>` +
+    `<p class="ts">Scanned ${ts}</p>`;
   resultsEl.appendChild(roll);
 
+  document.getElementById('copy-json-btn').addEventListener('click', () => {
+    const btn = document.getElementById('copy-json-btn');
+    navigator.clipboard.writeText(JSON.stringify(lastRawData, null, 2)).then(() => {
+      btn.textContent = 'Copied ✓';
+      setTimeout(() => { btn.textContent = 'Copy JSON'; }, 2000);
+    }).catch(() => {
+      btn.textContent = 'Copy failed';
+      setTimeout(() => { btn.textContent = 'Copy JSON'; }, 2000);
+    });
+  });
+
   for (const s of (hr.services || [])) {
-    const card = el('div', 'svc');
+    const card = document.createElement('div');
+    card.className = s.reachable ? 'svc' : 'svc unreachable';
+
+    // Header: service name + port + optional SSH banner chip
+    let headerInner =
+      `<h3>${escapeHtml(s.service)} <span style="color:var(--ink-soft);font-weight:400">:${s.port}</span>` +
+      (s.banner ? ` <span class="banner-chip">${escapeHtml(s.banner)}</span>` : '') +
+      `</h3>`;
+
+    // Error band — only when not reachable and error is known
+    const errorBand = (!s.reachable && s.error)
+      ? `<p class="error-band">⚠ ${escapeHtml(s.error)}</p>`
+      : '';
+
+    // Meta: TLS version + cipher, cert sig + expiry, cert subject
     let meta = '';
-    if (s.tlsVersion) meta += `${s.tlsVersion} · ${escapeHtml(s.cipherSuite || '')}`;
+    if (s.tlsVersion) meta += `${escapeHtml(s.tlsVersion)} · ${escapeHtml(s.cipherSuite || '')}`;
     if (s.certSignatureAlgorithm) {
-      meta += `${meta ? '<br>' : ''}cert signature: ${escapeHtml(s.certSignatureAlgorithm)}` +
+      meta += (meta ? '<br>' : '') +
+        `cert sig: ${escapeHtml(s.certSignatureAlgorithm)}` +
         (s.certNotAfter ? ` (expires ${escapeHtml(s.certNotAfter)})` : '');
     }
+    if (s.certSubject) {
+      meta += (meta ? '<br>' : '') + `cert: ${escapeHtml(s.certSubject)}`;
+    }
+
+    // Negotiated group highlight — ready cards only
+    const negotiated = (s.verdict === 'ready' && s.bestPqGroup)
+      ? `<p class="negotiated">Negotiated: <span>${escapeHtml(s.bestPqGroup)}</span></p>`
+      : '';
+
+    // Group matrix — low-confidence groups get amber pills
     let matrix = '';
     for (const g of (s.groups || [])) {
-      const pill = g.supported ? '<span class="pill yes">YES</span>' : '<span class="pill no">no</span>';
-      const note = g.note ? `<span class="note">— ${escapeHtml(g.note)}</span>` : '';
-      matrix += `<li>${pill}<span>${escapeHtml(g.group)}</span>${note}</li>`;
+      let pillCls, pillText;
+      if (g.lowConfidence) {
+        pillCls = g.supported ? 'pill lowconf-yes' : 'pill lowconf-no';
+        pillText = g.supported ? '~YES' : '~no';
+      } else {
+        pillCls = g.supported ? 'pill yes' : 'pill no';
+        pillText = g.supported ? 'YES' : 'no';
+      }
+      const noteText = g.lowConfidence ? (g.note || 'result is low-confidence') : (g.note || '');
+      const note = noteText ? `<span class="note">— ${escapeHtml(noteText)}</span>` : '';
+      matrix += `<li><span class="${pillCls}">${pillText}</span><span>${escapeHtml(g.group)}</span>${note}</li>`;
     }
+
     card.innerHTML =
-      `<div class="head"><h3>${escapeHtml(s.service)} <span style="color:var(--ink-soft);font-weight:400">:${s.port}</span></h3>${badge(s.verdict, verdictLabel(s.verdict))}</div>` +
+      `<div class="head">${headerInner}${badge(s.verdict, verdictLabel(s.verdict))}</div>` +
+      errorBand +
       (meta ? `<p class="meta">${meta}</p>` : '') +
+      negotiated +
       (matrix ? `<ul class="matrix">${matrix}</ul>` : '') +
-      `<p class="briefing">${escapeHtml(s.briefing || '')}</p>`;
+      formatBriefing(s.briefing || '');
+
     resultsEl.appendChild(card);
   }
   resultsEl.hidden = false;
+}
+
+// Split briefing at "Remediation:" to give it visual prominence.
+function formatBriefing(text) {
+  if (!text) return '';
+  const idx = text.indexOf('Remediation:');
+  if (idx === -1) return `<p class="briefing">${escapeHtml(text)}</p>`;
+  const before = text.slice(0, idx).trim();
+  const after = text.slice(idx + 'Remediation:'.length).trim();
+  return (before ? `<p class="briefing">${escapeHtml(before)}</p>` : '') +
+    `<p class="remediation"><strong>Remediation:</strong> ${escapeHtml(after)}</p>`;
 }
 
 function verdictLabel(v) {
@@ -112,7 +183,7 @@ function verdictLabel(v) {
 }
 
 function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => (
-    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
-  ));
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])
+  );
 }
