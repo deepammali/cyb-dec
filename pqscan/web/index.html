@@ -3,73 +3,123 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>pqscan — quantum-safe checker</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <title>pqscan</title>
+  <meta name="description" content="Check whether a host's services use post-quantum key exchange (ML-KEM), with the evidence behind every result.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230E7C86'/%3E%3Cpath d='M9 17l5 5 9-11' stroke='white' stroke-width='3.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <main class="wrap">
-    <header>
-      <p class="eyebrow">pqscan</p>
-      <h1>Is your site quantum-safe?</h1>
-      <p class="lede">Enter a hostname. pqscan runs a real TLS handshake, offers post-quantum
-        key exchange (ML-KEM), and reports whether the server actually uses it — the defense
-        against “harvest now, decrypt later”.</p>
-    </header>
+  <a class="skip" href="#host">Skip to scan</a>
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <a class="brand" href="./">pqscan</a>
+      <nav><a href="#how">How it's tested</a></nav>
+    </div>
+  </header>
 
-    <form id="scan-form" autocomplete="off">
-      <div class="input-row">
-        <input id="host" name="host" type="text" inputmode="url" spellcheck="false"
-               placeholder="e.g. cloudflare.com" aria-label="hostname to scan" required>
-        <button id="go" type="submit">Scan</button>
+  <main class="wrap">
+    <section class="intro">
+      <h1>Check a host for post-quantum key exchange</h1>
+      <p class="lede">pqscan offers ML-KEM in real handshakes and reports what each server actually chooses, with the evidence behind every result.</p>
+    </section>
+
+    <form id="scan-form" autocomplete="off" novalidate>
+      <div class="target-row">
+        <label for="host" class="sr-only">Host, IP address, or host:port</label>
+        <input id="host" name="host" type="text" inputmode="url" spellcheck="false" autocapitalize="off"
+               placeholder="hostname, IP, or host:port" aria-describedby="host-hint">
+        <button id="go" type="submit" class="primary">Scan</button>
+        <button id="stop" type="button" class="secondary" hidden>Stop</button>
+      </div>
+      <p id="host-hint" class="hint">e.g. <code>mail.corp.local</code>, <code>10.0.0.5:2222</code>, <code>[fd00::5]:8443</code></p>
+
+      <div id="scope-row" class="field">
+        <span id="scope-label" class="field-label">Scope</span>
+        <div id="chips" class="chips" role="group" aria-labelledby="scope-label"></div>
+        <p id="scope-summary" class="field-note" aria-live="polite"></p>
+        <fieldset id="custom" class="custom" hidden>
+          <legend class="sr-only">Choose individual services</legend>
+        </fieldset>
       </div>
 
-      <details id="svc-details">
-        <summary>Services <span id="svc-summary">HTTPS</span></summary>
-        <div class="svc-grid">
-          <label class="svc-all"><input type="checkbox" id="svc-all"> <strong>All services</strong></label>
-          <fieldset>
-            <legend>Implicit TLS</legend>
-            <label><input type="checkbox" name="svc" value="HTTPS" checked> HTTPS <small>443</small></label>
-            <label><input type="checkbox" name="svc" value="SMTPS"> SMTPS <small>465</small></label>
-            <label><input type="checkbox" name="svc" value="IMAPS"> IMAPS <small>993</small></label>
-            <label><input type="checkbox" name="svc" value="POP3S"> POP3S <small>995</small></label>
-            <label><input type="checkbox" name="svc" value="FTPS"> FTPS <small>990</small></label>
-            <label><input type="checkbox" name="svc" value="LDAPS"> LDAPS <small>636</small></label>
-            <label><input type="checkbox" name="svc" value="DoT"> DoT <small>853</small></label>
-            <label><input type="checkbox" name="svc" value="MQTT"> MQTT <small>8883</small></label>
-            <label><input type="checkbox" name="svc" value="AMQP"> AMQP <small>5671</small></label>
-            <label><input type="checkbox" name="svc" value="MongoDB"> MongoDB <small>27017</small></label>
-            <label><input type="checkbox" name="svc" value="Redis"> Redis <small>6379</small></label>
-            <label><input type="checkbox" name="svc" value="Syslog-TLS"> Syslog-TLS <small>6514</small></label>
-          </fieldset>
-          <fieldset>
-            <legend>STARTTLS</legend>
-            <label><input type="checkbox" name="svc" value="SMTP"> SMTP <small>25</small></label>
-            <label><input type="checkbox" name="svc" value="SMTP-submission"> SMTP-submission <small>587</small></label>
-            <label><input type="checkbox" name="svc" value="IMAP"> IMAP <small>143</small></label>
-            <label><input type="checkbox" name="svc" value="POP3"> POP3 <small>110</small></label>
-            <label><input type="checkbox" name="svc" value="FTP"> FTP <small>21</small></label>
-            <label><input type="checkbox" name="svc" value="PostgreSQL"> PostgreSQL <small>5432</small></label>
-          </fieldset>
-          <fieldset>
-            <legend>SSH</legend>
-            <label><input type="checkbox" name="svc" value="SSH"> SSH / SFTP / SCP <small>22</small></label>
-          </fieldset>
+      <div id="protocol-row" class="field" hidden>
+        <label for="protocol" class="field-label">Protocol</label>
+        <select id="protocol"></select>
+        <p id="protocol-note" class="field-note">A port was entered: only that port is probed.</p>
+      </div>
+
+      <p id="form-error" class="form-error" role="alert" hidden></p>
+      <p class="hint">Scan only systems you are authorized to test.</p>
+    </form>
+
+    <div id="announcer" class="sr-only" aria-live="polite"></div>
+
+    <section id="report" class="report" hidden>
+      <div id="verdict" class="verdict"></div>
+
+      <details class="meaning">
+        <summary>What this means</summary>
+        <div class="prose">
+          <p><strong>Harvest now, decrypt later.</strong> Anyone who records encrypted traffic today can keep it until a large quantum computer can break the classical key exchange that protected it (X25519, ECDH, RSA). Traffic recorded today can't be protected after the fact, which is why the key exchange is what matters now.</p>
+          <p><strong>Post-quantum key exchange.</strong> <code>X25519MLKEM768</code> combines classical X25519 with ML-KEM-768 (NIST FIPS 203). The connection stays secure as long as either one holds, so it is safe to deploy today.</p>
+          <p><strong>Why not certificates?</strong> A certificate signature only has to resist an attacker during the handshake, so recorded traffic doesn't make it vulnerable later. Moving certificates to ML-DSA is a planning item, not an emergency.</p>
+          <p><strong>What pqscan doesn't check.</strong> Certificate trust and validity, application-layer encryption, and anything behind the endpoint it reached.</p>
         </div>
       </details>
-    </form>
-    <p class="hint">Scans only public endpoints you are entitled to check.</p>
 
-    <section id="status" class="status" hidden></section>
-    <section id="results" hidden></section>
+      <section id="services" class="services" aria-labelledby="services-title"></section>
+      <section id="recs" class="recs" aria-labelledby="recs-title" hidden></section>
+    </section>
 
-    <footer>
-      <span>Checks ML-KEM key exchange per <a href="https://datatracker.ietf.org/doc/html/rfc8446">RFC&nbsp;8446</a> · <a href="https://doi.org/10.6028/NIST.FIPS.203">FIPS&nbsp;203</a>.</span>
-    </footer>
+    <section id="how" class="how" aria-labelledby="how-title">
+      <h2 id="how-title">How it's tested</h2>
+      <div class="prose">
+        <p>For each TLS service, pqscan runs two independent checks:</p>
+        <ol>
+          <li><strong>Offer test.</strong> A hand-built ClientHello offers <code>X25519MLKEM768</code> together with classical <code>X25519</code>, with valid keys, the way current browsers do. The server's ServerHello names the group it picked; that is the server's own answer, not an inference. The other ML-KEM groups (<code>SecP256r1MLKEM768</code>, <code>SecP384r1MLKEM1024</code>) are tested the same way.</li>
+          <li><strong>Forced test.</strong> A second, independent TLS client (Go's <code>crypto/tls</code>) completes a full handshake offering <em>only</em> <code>X25519MLKEM768</code>. It completes only if the server really does ML-KEM.</li>
+        </ol>
+        <p>For SSH, the server sends its complete list of key-exchange methods before encryption starts. SSH picks the first method in the client's list that the server supports (RFC 4253 §7.1), so that list is authoritative.</p>
+        <p>Before any result is trusted, four <strong>engine controls</strong> run against local reference servers with known answers: an ML-KEM TLS server must read post-quantum and a classical one must read classical, and likewise for SSH. If a control fails, the web server refuses to start.</p>
+      </div>
+
+      <h3>Could a result be wrong?</h3>
+      <div class="matrix-wrap">
+        <table class="truth">
+          <caption class="sr-only">How pqscan rules out each kind of error</caption>
+          <thead>
+            <tr><th scope="col"></th><th scope="col">Server really uses ML-KEM</th><th scope="col">Server doesn't</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row">pqscan says <span class="tag tag-pq">Post-quantum</span></th>
+              <td class="ok"><strong>True positive</strong></td>
+              <td class="err"><strong>False positive.</strong> Ruled out when the forced test completes, because a server without ML-KEM can't finish that handshake. The negative control rules out a systematic false positive. If the two tests disagree, the result is marked <em>Unverified</em>, not post-quantum.</td>
+            </tr>
+            <tr>
+              <th scope="row">pqscan says <span class="tag tag-classical">Classical</span></th>
+              <td class="err"><strong>False negative.</strong> Ruled out when ML-KEM is offered first with a valid key and the forced test is refused too. The positive control rules out a systematic false negative. One cause can't be seen from the server: a middlebox that strips ML-KEM offers. The <em>network path</em> check (<code>--reference</code>) detects that.</td>
+              <td class="ok"><strong>True negative</strong></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Confidence</h3>
+      <dl class="conf-list">
+        <div><dt><span class="conf conf-confirmed">Confirmed</span></dt><dd>Two independent checks agree, or the protocol makes a single check authoritative (the SSH method list, a refused STARTTLS).</dd></div>
+        <div><dt><span class="conf conf-high">One check</span></dt><dd>The decisive check succeeded but the confirming one couldn't run (for example, a timeout).</dd></div>
+        <div><dt><span class="conf conf-partial">Some clients</span></dt><dd>Post-quantum only with clients that offer the P-256/P-384 hybrids. Browsers get classical key exchange.</dd></div>
+        <div><dt><span class="conf conf-inconsistent">Unverified</span></dt><dd>The checks disagreed, usually because several differently configured servers share one address. Re-scan before relying on it.</dd></div>
+        <div><dt><span class="conf conf-low">Low</span></dt><dd>An engine control failed, or the network path strips ML-KEM, so the result may be wrong.</dd></div>
+      </dl>
+      <p class="prose small">Every result is valid for the IP address and port shown, as reached from this scanner at scan time. Other servers behind the same name, or a TLS-inspecting proxy, can behave differently.</p>
+    </section>
   </main>
+
+  <footer class="wrap footer">
+    <span>pqscan checks key exchange per <a href="https://datatracker.ietf.org/doc/html/rfc8446">RFC 8446</a>, <a href="https://datatracker.ietf.org/doc/draft-ietf-tls-ecdhe-mlkem/">draft-ietf-tls-ecdhe-mlkem</a>, and <a href="https://doi.org/10.6028/NIST.FIPS.203">FIPS 203</a>. Everything on this page is served by the scanner itself.</span>
+  </footer>
   <script src="app.js"></script>
 </body>
 </html>

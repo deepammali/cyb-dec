@@ -66,6 +66,29 @@ func TestParseServerResponse(t *testing.T) {
 	if !c.Alert {
 		t.Fatalf("expected alert, got %+v", c)
 	}
+
+	// A ServerHello without key_share is a TLS 1.2 handshake: found, no group.
+	c, err = parseServerResponse(synthServerHelloNoKeyShare())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Found || c.Selected != 0 {
+		t.Fatalf("TLS 1.2 ServerHello: got %+v, want found with no group", c)
+	}
+}
+
+func synthServerHelloNoKeyShare() []byte {
+	var body []byte
+	body = append(body, u16(0x0303)...)
+	body = append(body, make([]byte, 32)...)
+	body = append(body, 0x00)
+	body = append(body, u16(0xC02F)...) // ECDHE-RSA-AES128-GCM-SHA256
+	body = append(body, 0x00)
+	hs := []byte{0x02, byte(len(body) >> 16), byte(len(body) >> 8), byte(len(body))}
+	hs = append(hs, body...)
+	rec := []byte{0x16, 0x03, 0x03}
+	rec = append(rec, u16(uint16(len(hs)))...)
+	return append(rec, hs...)
 }
 
 // synthServerHello builds a minimal TLS record with a ServerHello selecting group.
@@ -101,11 +124,11 @@ func TestCalibrationLive(t *testing.T) {
 	if os.Getenv("PQSCAN_NETTEST") == "" {
 		t.Skip("set PQSCAN_NETTEST=1 to run live calibration")
 	}
-	ok, err := probeGroup("cloudflare.com:443", "cloudflare.com", GroupX25519MLKEM768, nil, 10*time.Second)
+	c, err := probeGroup("cloudflare.com:443", "cloudflare.com", GroupX25519MLKEM768, nil, 10*time.Second)
 	if err != nil {
 		t.Skipf("cannot reach cloudflare.com: %v", err)
 	}
-	if !ok {
+	if c.Selected != GroupX25519MLKEM768 {
 		t.Skip("cloudflare.com did not negotiate X25519MLKEM768 from here " +
 			"(this environment's egress may not carry PQC handshakes)")
 	}

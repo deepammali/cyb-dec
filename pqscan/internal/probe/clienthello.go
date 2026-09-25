@@ -83,9 +83,10 @@ func buildClientHello(serverName string, groups ...uint16) ([]byte, error) {
 	}
 	body.WriteByte(32) // legacy_session_id length
 	body.Write(sid)
+	// AES-256 first: a server that still picks AES-128 is showing its own preference.
 	body.Write(u16(6)) // cipher_suites length
-	body.Write(u16(0x1301))
 	body.Write(u16(0x1302))
+	body.Write(u16(0x1301))
 	body.Write(u16(0x1303))
 	body.Write([]byte{0x01, 0x00}) // compression_methods
 	body.Write(u16(uint16(len(exts))))
@@ -108,10 +109,11 @@ func buildClientHello(serverName string, groups ...uint16) ([]byte, error) {
 
 // serverChoice is the outcome of parsing a server's response to our ClientHello.
 type serverChoice struct {
-	Selected uint16 // the group the server picked (valid when Found)
-	Found    bool
-	HRR      bool // server sent a HelloRetryRequest
-	Alert    bool // server sent a fatal/handshake_failure alert = group not supported
+	Selected uint16 // the group the server picked; 0 = no key_share (TLS 1.2 or earlier)
+	Cipher   uint16 // the cipher suite the server picked
+	Found    bool   // a ServerHello was parsed
+	HRR      bool   // server sent a HelloRetryRequest
+	Alert    bool   // server refused the offer with an alert
 }
 
 // parseServerResponse reads TLS records from buf and extracts the server's
@@ -158,10 +160,14 @@ func parseServerHello(rec []byte) (serverChoice, error) {
 	}
 	sidLen := int(rec[p])
 	p += 1 + sidLen
+	if p+3 > len(rec) {
+		return serverChoice{}, errors.New("truncated at cipher_suite")
+	}
+	choice := serverChoice{Found: true, HRR: hrr, Cipher: binary.BigEndian.Uint16(rec[p : p+2])}
 	p += 2 // cipher_suite
 	p += 1 // compression_method
 	if p+2 > len(rec) {
-		return serverChoice{}, errors.New("truncated at extensions length")
+		return choice, nil // no extensions: a pre-TLS 1.3 ServerHello
 	}
 	extLen := int(binary.BigEndian.Uint16(rec[p : p+2]))
 	p += 2
@@ -177,13 +183,10 @@ func parseServerHello(rec []byte) (serverChoice, error) {
 		}
 		edata := rec[p+4 : p+4+elen]
 		if etype == 0x0033 && len(edata) >= 2 { // key_share
-			return serverChoice{
-				Selected: binary.BigEndian.Uint16(edata[:2]),
-				Found:    true,
-				HRR:      hrr,
-			}, nil
+			choice.Selected = binary.BigEndian.Uint16(edata[:2])
+			return choice, nil
 		}
 		p += 4 + elen
 	}
-	return serverChoice{}, errors.New("no key_share in ServerHello")
+	return choice, nil // no key_share: the server negotiated TLS 1.2 or earlier
 }

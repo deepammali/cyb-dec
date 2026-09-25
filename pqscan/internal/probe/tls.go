@@ -2,8 +2,11 @@ package probe
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
+	"io"
 	"net"
+	"strconv"
 	"time"
 )
 
@@ -11,37 +14,65 @@ import (
 const DefaultTimeout = 8 * time.Second
 
 // Preamble upgrades a freshly dialed TCP connection to the point where a TLS
-// ClientHello is expected (a STARTTLS negotiation). nil means implicit TLS: the
-// TLS handshake begins immediately on connect.
-type Preamble func(conn net.Conn, serverName string) error
+// ClientHello is expected (a STARTTLS negotiation) and returns the server's
+// greeting line, if it sent one. nil means implicit TLS.
+type Preamble func(conn net.Conn, serverName string) (greeting string, err error)
 
-// GroupResult is the outcome of probing a single named group.
+// GroupResult is the outcome of probing a single named group, with the evidence:
+// what we offered and what the server picked from that offer.
 type GroupResult struct {
 	Group         string `json:"group"`
 	ID            uint16 `json:"id"`
 	Supported     bool   `json:"supported"`
+	Offered       string `json:"offered,omitempty"`
+	ServerChose   string `json:"serverChose,omitempty"`
+	Alerted       bool   `json:"alerted,omitempty"`       // the server refused the whole offer
 	LowConfidence bool   `json:"lowConfidence,omitempty"` // legacy group: a negative is not authoritative
 	Note          string `json:"note,omitempty"`
 }
 
-// ServiceResult is the per-service readiness report. Kind is "tls" (default) or
-// "ssh"; a few fields are populated only for one kind.
+// ServiceResult is the per-service probe outcome. Kind is "tls" or "ssh"; a few
+// fields are populated only for one kind.
 type ServiceResult struct {
-	Service       string        `json:"service"`
-	Kind          string        `json:"kind,omitempty"` // "tls" (default) or "ssh"
-	Host          string        `json:"host"`
-	Port          int           `json:"port"`
-	Reachable     bool          `json:"reachable"`
-	Banner        string        `json:"banner,omitempty"` // SSH server identification string
-	TLSVersion    string        `json:"tlsVersion,omitempty"`
-	CipherSuite   string        `json:"cipherSuite,omitempty"`
-	Groups        []GroupResult `json:"groups"`
-	PQKeyExchange bool          `json:"pqKeyExchange"`
-	BestPQGroup   string        `json:"bestPqGroup,omitempty"`
-	CertSigAlg    string        `json:"certSignatureAlgorithm,omitempty"`
-	CertNotAfter  string        `json:"certNotAfter,omitempty"`
-	CertSubject   string        `json:"certSubject,omitempty"`
-	Error         string        `json:"error,omitempty"` // set when a service is undetermined
+	Service         string        `json:"service"`
+	Kind            string        `json:"kind"`
+	Protocol        string        `json:"protocol,omitempty"` // e.g. "tls", "smtp+starttls", "ssh"
+	Detected        bool          `json:"detected,omitempty"` // protocol was auto-detected
+	Host            string        `json:"host"`
+	Port            int           `json:"port"`
+	Reachable       bool          `json:"reachable"`
+	Banner          string        `json:"banner,omitempty"` // SSH identification or plaintext greeting
+	TLSVersion      string        `json:"tlsVersion,omitempty"`
+	CipherSuite     string        `json:"cipherSuite,omitempty"`
+	ServerCipher    string        `json:"serverCipher,omitempty"` // suite chosen when AES-256 was offered first
+	Groups          []GroupResult `json:"groups"`
+	Advertised      []string      `json:"advertised,omitempty"` // SSH kex_algorithms
+	PQKeyExchange   bool          `json:"pqKeyExchange"`
+	BestPQGroup     string        `json:"bestPqGroup,omitempty"`
+	NegotiatedGroup string        `json:"negotiatedGroup,omitempty"` // what a modern client (ML-KEM + X25519) gets
+	CertSigAlg      string        `json:"certSignatureAlgorithm,omitempty"`
+	CertNotAfter    string        `json:"certNotAfter,omitempty"`
+	CertSubject     string        `json:"certSubject,omitempty"`
+	Address         string        `json:"address,omitempty"`     // the IP:port actually tested
+	Forced          *ForcedCheck  `json:"forcedCheck,omitempty"` // independent second check (TLS)
+	Error           string        `json:"error,omitempty"`
+	ErrorKind       string        `json:"errorKind,omitempty"`
+}
+
+// ForcedCheck is the independent confirmation of a TLS result: a full handshake
+// with a different TLS implementation (Go crypto/tls) that offers only
+// X25519MLKEM768. It completes only if the server really does ML-KEM.
+type ForcedCheck struct {
+	Group     string `json:"group"`
+	Completed bool   `json:"completed"`        // handshake completed with ML-KEM
+	Refused   bool   `json:"refused"`          // server rejected an ML-KEM-only offer
+	Detail    string `json:"detail,omitempty"` // server's refusal, or why the check couldn't run
+}
+
+func (r ServiceResult) fail(err error) ServiceResult {
+	r.Error = err.Error()
+	r.ErrorKind = ErrorKind(err)
+	return r
 }
 
 // ProbeTLS scans one TLS service at host:port. serverName is the SNI to present
@@ -52,142 +83,192 @@ func ProbeTLS(service, host string, port int, serverName string, pre Preamble, t
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
-	res := ServiceResult{Service: service, Host: host, Port: port}
-	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
+	res := ServiceResult{Service: service, Kind: "tls", Host: host, Port: port}
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+
+	// A failed connect or STARTTLS negotiation would fail identically for every
+	// group probe, so stop here rather than wait out the timeout again.
+	raw, greeting, err := dialWithPreamble(addr, serverName, pre, timeout)
+	res.Banner = greeting
+	if err != nil {
+		return res.fail(err)
+	}
+	res.Address = raw.RemoteAddr().String()
 
 	// TLS/cert context via a standard handshake (skip verification but keep the cert).
 	reachable := false
-	if raw, err := dialWithPreamble(addr, serverName, pre, timeout); err == nil {
-		tconn := tls.Client(raw, &tls.Config{
-			ServerName:         serverName,
-			InsecureSkipVerify: true,
-			MinVersion:         tls.VersionTLS12,
-		})
-		tconn.SetDeadline(time.Now().Add(timeout))
-		if err := tconn.Handshake(); err == nil {
-			reachable = true
-			st := tconn.ConnectionState()
-			res.TLSVersion = tlsVersionName(st.Version)
-			res.CipherSuite = tls.CipherSuiteName(st.CipherSuite)
-			if len(st.PeerCertificates) > 0 {
-				c := st.PeerCertificates[0]
-				res.CertSigAlg = c.SignatureAlgorithm.String()
-				res.CertNotAfter = c.NotAfter.UTC().Format("2006-01-02")
-				res.CertSubject = c.Subject.CommonName
-			}
+	tconn := tls.Client(raw, &tls.Config{
+		ServerName:         serverName,
+		InsecureSkipVerify: true,
+		MinVersion:         tls.VersionTLS12,
+	})
+	tconn.SetDeadline(time.Now().Add(timeout))
+	if err := tconn.Handshake(); err == nil {
+		reachable = true
+		st := tconn.ConnectionState()
+		res.TLSVersion = tlsVersionName(st.Version)
+		res.CipherSuite = tls.CipherSuiteName(st.CipherSuite)
+		if len(st.PeerCertificates) > 0 {
+			c := st.PeerCertificates[0]
+			res.CertSigAlg = c.SignatureAlgorithm.String()
+			res.CertNotAfter = c.NotAfter.UTC().Format("2006-01-02")
+			res.CertSubject = c.Subject.CommonName
 		}
-		tconn.Close()
 	}
+	tconn.Close()
 
 	// ML-KEM group support matrix via hand-crafted ClientHellos.
-	for _, g := range PQGroups {
-		gr := GroupResult{Group: g.Name, ID: g.ID}
-		supported, derr := probeGroup(addr, serverName, g.ID, pre, timeout)
+	for i, g := range PQGroups {
+		gr := GroupResult{Group: g.Name, ID: g.ID, Offered: g.Name + " + X25519"}
+		c, derr := probeGroup(addr, serverName, g.ID, pre, timeout)
 		if derr != nil {
 			if !reachable {
-				res.Error = derr.Error()
-				return res
+				return res.fail(derr)
 			}
 			gr.Note = "probe error: " + derr.Error()
 		} else {
-			gr.Supported = supported
 			reachable = true
+			gr.Supported = c.Found && c.Selected == g.ID
+			gr.Alerted = c.Alert
+			if c.Found {
+				gr.ServerChose = chosenName(c.Selected)
+			}
+			if i == 0 && c.Found {
+				// Our first offer mirrors a current browser (X25519MLKEM768 + X25519).
+				res.NegotiatedGroup = gr.ServerChose
+				res.ServerCipher = tls.CipherSuiteName(c.Cipher)
+			}
 		}
 		if g.Legacy {
 			gr.LowConfidence = true
-			if !supported {
+			if !gr.Supported {
 				gr.Note = "legacy draft; negative is not authoritative (Kyber round-3 key not minted)"
 			}
 		}
 		res.Groups = append(res.Groups, gr)
-		if supported && !g.Legacy {
+		if gr.Supported && !g.Legacy {
 			res.PQKeyExchange = true
 			if res.BestPQGroup == "" {
 				res.BestPQGroup = g.Name
 			}
-		} else if supported && g.Legacy && res.BestPQGroup == "" {
+		} else if gr.Supported && g.Legacy && res.BestPQGroup == "" {
 			res.BestPQGroup = g.Name + " (legacy)"
 		}
 	}
 	res.Reachable = reachable
-	if !reachable && res.Error == "" {
-		res.Error = "no TLS response"
-	}
+	res.Forced = forcedMLKEM(addr, serverName, pre, timeout)
 	return res
 }
 
+// forcedMLKEM runs the independent check: a complete Go crypto/tls handshake
+// that offers only X25519MLKEM768.
+func forcedMLKEM(addr, serverName string, pre Preamble, timeout time.Duration) *ForcedCheck {
+	fc := &ForcedCheck{Group: "X25519MLKEM768"}
+	raw, _, err := dialWithPreamble(addr, serverName, pre, timeout)
+	if err != nil {
+		fc.Detail = "could not connect: " + err.Error()
+		return fc
+	}
+	defer raw.Close()
+	c := tls.Client(raw, &tls.Config{
+		ServerName:         serverName,
+		InsecureSkipVerify: true,
+		MinVersion:         tls.VersionTLS13,
+		CurvePreferences:   []tls.CurveID{tls.X25519MLKEM768},
+	})
+	c.SetDeadline(time.Now().Add(timeout))
+	err = c.Handshake()
+	switch {
+	case err == nil:
+		fc.Completed = true
+	case ErrorKind(err) == "timeout":
+		fc.Detail = "timed out: " + err.Error()
+	default:
+		// An alert, a hang-up, or a server choosing something we didn't offer:
+		// in every case the server did not complete an ML-KEM handshake.
+		fc.Refused = true
+		fc.Detail = err.Error()
+	}
+	return fc
+}
+
+func chosenName(id uint16) string {
+	if id == 0 {
+		return "none (TLS 1.2 handshake)"
+	}
+	return GroupName(id)
+}
+
 // dialWithPreamble opens a TCP connection, applies the STARTTLS preamble if any,
-// and returns the connection positioned for a TLS ClientHello.
-func dialWithPreamble(addr, serverName string, pre Preamble, timeout time.Duration) (net.Conn, error) {
+// and returns the connection positioned for a TLS ClientHello plus the server's
+// plaintext greeting (empty for implicit TLS).
+func dialWithPreamble(addr, serverName string, pre Preamble, timeout time.Duration) (net.Conn, string, error) {
 	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	conn.SetDeadline(time.Now().Add(timeout))
-	if pre != nil {
-		if err := pre(conn, serverName); err != nil {
-			conn.Close()
-			return nil, err
-		}
+	if pre == nil {
+		return conn, "", nil
 	}
-	return conn, nil
+	greeting, err := pre(conn, serverName)
+	if err != nil {
+		conn.Close()
+		return nil, greeting, err
+	}
+	return conn, greeting, nil
 }
 
 // probeGroup offers the group under test together with a classical fallback
-// (X25519) and reports whether the server selected the tested group.
-func probeGroup(addr, serverName string, group uint16, pre Preamble, timeout time.Duration) (bool, error) {
+// (X25519) and returns what the server selected from that offer.
+func probeGroup(addr, serverName string, group uint16, pre Preamble, timeout time.Duration) (serverChoice, error) {
 	offer := []uint16{group}
 	if group != GroupX25519 {
 		offer = append(offer, GroupX25519)
 	}
 	hello, err := buildClientHello(serverName, offer...)
 	if err != nil {
-		return false, err
+		return serverChoice{}, err
 	}
-	conn, err := dialWithPreamble(addr, serverName, pre, timeout)
+	conn, _, err := dialWithPreamble(addr, serverName, pre, timeout)
 	if err != nil {
-		return false, err
+		return serverChoice{}, err
 	}
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(timeout))
 	if _, err := conn.Write(hello); err != nil {
-		return false, err
+		return serverChoice{}, err
 	}
 
 	buf := make([]byte, 0, 4096)
 	tmp := make([]byte, 4096)
+	var lastErr error
 	for {
 		n, rerr := conn.Read(tmp)
 		if n > 0 {
 			buf = append(buf, tmp[:n]...)
-			if c, perr := parseServerResponse(buf); perr == nil {
-				if c.Alert {
-					return false, nil
-				}
-				if c.Found {
-					return c.Selected == group, nil
-				}
+			if c, perr := parseServerResponse(buf); perr == nil && (c.Alert || c.Found) {
+				return c, nil
 			}
 			if len(buf) > 1<<16 {
 				break
 			}
 		}
 		if rerr != nil {
+			lastErr = rerr
 			break
 		}
 	}
-	if c, perr := parseServerResponse(buf); perr == nil {
-		if c.Alert {
-			return false, nil
-		}
-		if c.Found {
-			return c.Selected == group, nil
-		}
+	if c, perr := parseServerResponse(buf); perr == nil && (c.Alert || c.Found) {
+		return c, nil
 	}
-	if len(buf) == 0 {
-		return false, fmt.Errorf("no response from %s", addr)
+	if len(buf) > 0 {
+		return serverChoice{}, errNotTLS
 	}
-	return false, nil
+	if lastErr != nil && !errors.Is(lastErr, io.EOF) {
+		return serverChoice{}, fmt.Errorf("no TLS response: %w", lastErr)
+	}
+	return serverChoice{}, errClosedByPeer
 }
 
 func tlsVersionName(v uint16) string {

@@ -21,6 +21,12 @@ func isSSHPQKex(name string) bool {
 	return strings.Contains(n, "mlkem") || strings.Contains(n, "sntrup") || strings.Contains(n, "kyber")
 }
 
+// isSSHPseudoKex reports extension markers that ride in kex_algorithms but are
+// not key-exchange methods (RFC 8308 ext-info, OpenSSH strict-kex).
+func isSSHPseudoKex(name string) bool {
+	return strings.HasPrefix(name, "ext-info-") || strings.HasPrefix(name, "kex-strict-")
+}
+
 // ProbeSSH connects to an SSH server, reads its (cleartext) KEXINIT, and reports
 // which post-quantum key-exchange methods it advertises. SSH publishes its
 // kex_algorithms list before any encryption, so no handshake completion is needed.
@@ -28,39 +34,39 @@ func ProbeSSH(service, host string, port int, timeout time.Duration) ServiceResu
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
-	res := ServiceResult{Service: service, Kind: "ssh", Host: host, Port: port}
+	res := ServiceResult{Service: service, Kind: "ssh", Protocol: "ssh", Host: host, Port: port}
 	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
 
 	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
-		res.Error = err.Error()
-		return res
+		return res.fail(err)
 	}
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(timeout))
+	res.Address = conn.RemoteAddr().String()
 
 	banner, err := readSSHBanner(conn)
 	if err != nil {
-		res.Error = "reading SSH banner: " + err.Error()
-		return res
+		return res.fail(fmt.Errorf("reading SSH banner: %w", err))
 	}
 	res.Reachable = true
 	res.Banner = banner
 
 	if _, err := conn.Write([]byte("SSH-2.0-pqscan_0.1\r\n")); err != nil {
-		res.Error = err.Error()
-		return res
+		return res.fail(err)
 	}
 
 	kex, err := readSSHKexAlgorithms(conn)
 	if err != nil {
-		res.Error = "reading KEXINIT: " + err.Error()
-		return res
+		return res.fail(fmt.Errorf("reading KEXINIT: %w", err))
 	}
 
 	offered := map[string]bool{}
 	for _, k := range kex {
 		offered[k] = true
+		if !isSSHPseudoKex(k) {
+			res.Advertised = append(res.Advertised, k)
+		}
 	}
 	// Known PQC kex as a matrix.
 	seen := map[string]bool{}

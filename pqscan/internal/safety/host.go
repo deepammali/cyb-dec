@@ -1,12 +1,13 @@
-// Package safety validates scan targets and rate-limits requests. The scanner
-// dials whatever host a user supplies, so it must refuse to be pointed at
-// loopback, private, link-local, or cloud-metadata addresses (SSRF defense).
+// Package safety parses scan targets and rate-limits requests. Private and
+// internal addresses are scanned by default; ValidatePublic is the opt-in refusal
+// for deployments exposed to the internet (SSRF defense).
 package safety
 
 import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,14 +24,10 @@ var extraBlocked = []netip.Prefix{
 	netip.MustParsePrefix("fe80::/10"),     // v6 link-local (redundant, explicit)
 }
 
-// NormalizeHost strips any scheme, path, and port from user input and returns a
-// bare hostname (or IP literal). It does not resolve or validate reachability.
-func NormalizeHost(in string) (string, error) {
+// ParseTarget turns user input (bare host, host:port, [v6]:port, or a URL) into a
+// lowercase host and an optional port (0 when none was given).
+func ParseTarget(in string) (host string, port int, err error) {
 	s := strings.TrimSpace(in)
-	if s == "" {
-		return "", fmt.Errorf("empty host")
-	}
-	// Drop scheme and anything after the authority.
 	if i := strings.Index(s, "://"); i >= 0 {
 		s = s[i+3:]
 	}
@@ -38,26 +35,79 @@ func NormalizeHost(in string) (string, error) {
 	if i := strings.IndexAny(s, "/?#"); i >= 0 {
 		s = s[:i]
 	}
-	s = strings.Trim(s, ".")
+	if i := strings.LastIndex(s, "@"); i >= 0 { // drop user:pass@
+		s = s[i+1:]
+	}
 	if s == "" {
-		return "", fmt.Errorf("no host in input")
+		return "", 0, fmt.Errorf("enter a hostname, IP address, or host:port")
 	}
-	// Strip an optional :port (but keep bracketed IPv6 intact).
-	if strings.HasPrefix(s, "[") {
-		if h, _, err := net.SplitHostPort(s); err == nil {
-			s = h
-		} else {
-			s = strings.Trim(s, "[]")
+
+	portStr := ""
+	switch {
+	case strings.HasPrefix(s, "["):
+		end := strings.Index(s, "]")
+		if end < 0 {
+			return "", 0, fmt.Errorf("unclosed '[' in %q", in)
 		}
-	} else if strings.Count(s, ":") == 1 {
-		if h, _, err := net.SplitHostPort(s); err == nil {
-			s = h
+		host, rest := s[1:end], s[end+1:]
+		if rest != "" {
+			if !strings.HasPrefix(rest, ":") {
+				return "", 0, fmt.Errorf("unexpected %q after IPv6 address", rest)
+			}
+			portStr = rest[1:]
 		}
+		s = host
+	case strings.Count(s, ":") == 1:
+		s, portStr, _ = strings.Cut(s, ":")
 	}
-	return strings.ToLower(s), nil
+
+	s = strings.ToLower(strings.Trim(s, "."))
+	if s == "" {
+		return "", 0, fmt.Errorf("no host in %q", in)
+	}
+	if !validHost(s) {
+		return "", 0, fmt.Errorf("%q is not a valid hostname or IP address", s)
+	}
+	if portStr != "" {
+		p, err := strconv.Atoi(portStr)
+		if err != nil || p < 1 || p > 65535 {
+			return "", 0, fmt.Errorf("port must be 1–65535, got %q", portStr)
+		}
+		port = p
+	}
+	return s, port, nil
 }
 
-// blocked reports whether an address must never be scanned.
+func validHost(s string) bool {
+	if _, err := netip.ParseAddr(s); err == nil {
+		return true
+	}
+	if len(s) > 253 {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '.', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// Resolve reports whether host is an IP literal or resolves via the system
+// resolver (DNS, /etc/hosts, and whatever else the platform consults).
+func Resolve(host string) error {
+	if _, err := netip.ParseAddr(host); err == nil {
+		return nil
+	}
+	if _, err := net.LookupHost(host); err != nil {
+		return fmt.Errorf("cannot resolve %q", host)
+	}
+	return nil
+}
+
+// blocked reports whether an address is non-public.
 func blocked(ip netip.Addr) bool {
 	if !ip.IsValid() {
 		return true
@@ -76,37 +126,29 @@ func blocked(ip netip.Addr) bool {
 	return false
 }
 
-// Validate normalizes the host, resolves it, and rejects it if any resolved
-// address is non-public. It returns the normalized host to scan.
-func Validate(in string) (string, error) {
-	host, err := NormalizeHost(in)
-	if err != nil {
-		return "", err
-	}
-
-	// Direct IP literal.
+// ValidatePublic rejects a host that is, or resolves to, a non-public address.
+// It is used only when the web server runs with --public-only.
+func ValidatePublic(host string) error {
 	if ip, err := netip.ParseAddr(host); err == nil {
 		if blocked(ip) {
-			return "", fmt.Errorf("refusing to scan non-public address %s", ip)
+			return fmt.Errorf("this server only scans public addresses (--public-only); %s is not public", ip)
 		}
-		return host, nil
+		return nil
 	}
-
-	// Hostname: resolve and require every result to be public (blocks rebinding to internal).
 	ips, err := net.LookupIP(host)
 	if err != nil {
-		return "", fmt.Errorf("cannot resolve %q: %w", host, err)
+		return fmt.Errorf("cannot resolve %q", host)
 	}
 	if len(ips) == 0 {
-		return "", fmt.Errorf("no addresses for %q", host)
+		return fmt.Errorf("no addresses for %q", host)
 	}
 	for _, nip := range ips {
 		a, ok := netip.AddrFromSlice(nip)
 		if !ok || blocked(a.Unmap()) {
-			return "", fmt.Errorf("refusing to scan %q: resolves to non-public address %s", host, nip)
+			return fmt.Errorf("this server only scans public addresses (--public-only); %q resolves to %s", host, nip)
 		}
 	}
-	return host, nil
+	return nil
 }
 
 // RateLimiter is a minimal fixed-window per-key limiter for the web endpoint.

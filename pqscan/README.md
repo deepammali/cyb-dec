@@ -1,163 +1,265 @@
 # pqscan — post-quantum readiness scanner
 
 `pqscan` tells you whether a host's secure services use **post-quantum key
-exchange** (ML-KEM). It runs a real TLS 1.3 handshake, offers the post-quantum
-hybrid groups, and reports which one the server actually negotiates — the defense
-against **Harvest-Now-Decrypt-Later (HNDL)**, where an attacker records encrypted
-traffic today to decrypt once quantum computers can break classical key exchange.
+exchange** (ML-KEM), and shows the evidence for every result. It offers the
+post-quantum hybrid groups in real handshakes and reports what each server actually
+chooses. This is the defense against **Harvest-Now-Decrypt-Later (HNDL)**, where an
+attacker records encrypted traffic today and decrypts it once quantum computers can
+break classical key exchange.
 
-Written in Go with the **standard library only** — no third-party dependencies.
+It is written in Go with the **standard library only**, ships as a single binary,
+and works on internal networks and offline: the web UI makes no requests to anything
+except the scanner itself.
 
 ## Quick start
 
 ```sh
 # CLI
-go run ./cmd/pqscan cloudflare.com
-go run ./cmd/pqscan --json example.com
-go run ./cmd/pqscan --selftest        # verify the engine against a local PQC server
+go run ./cmd/pqscan mail.corp.local                  # every service in the catalog
+go run ./cmd/pqscan --services mail,web example.com  # role presets or service names
+go run ./cmd/pqscan 10.0.0.5:2222                    # one port, protocol auto-detected
+go run ./cmd/pqscan --json host                      # machine-readable report
+go run ./cmd/pqscan --selftest                       # run the engine controls and exit
 
-# Web app (self-contained binary; serves UI + POST /api/scan)
+# Web app (UI + JSON API)
 go run ./cmd/pqscan-web --addr :8080
 ```
 
-Exit codes (CLI): `0` ready, `1` not ready, `2` usage error, `3` undetermined.
+CLI exit codes: `0` post-quantum, `1` not post-quantum, `2` usage error, `3` undetermined.
+
+Useful flags (CLI and web):
+
+| Flag | Meaning |
+|---|---|
+| `--timeout 8s` | Per-probe timeout. |
+| `--reference host[:port]` | A server known to support ML-KEM, used to check that this machine's network path carries ML-KEM handshakes (see [Reading results](#reading-results)). Off by default, so the scanner contacts nothing on its own. |
+| `--protocol auto` (CLI) | For `host:port` targets: `auto`, `tls`, `ssh`, `smtp`, `imap`, `pop3`, `ftp`, `postgres`. |
+| `--public-only` (web) | Refuse private, loopback, and link-local targets. Use it only when the web server is exposed to the internet. By default, internal addresses and names are scanned like any other. |
 
 ## What it checks
 
-- **TLS services** (Phases 1–2), by default **HTTPS/443**; scan more with
-  `--services` (or `--services all`):
-  - implicit TLS: `HTTPS`, `SMTPS`, `IMAPS`, `POP3S`, `FTPS`, `LDAPS`, `DoT`,
-    `MQTT`, `AMQP`, `MongoDB`, `Redis`, `Syslog-TLS`;
-  - STARTTLS: `SMTP` (25), `SMTP-submission` (587), `IMAP` (143), `POP3` (110),
-    `FTP` (21), `PostgreSQL` (5432).
-- **SSH** (Phase 3), on port 22 — covers SSH, SFTP, SCP, and Git-over-SSH, which
-  all run over the SSH transport. It reads the server's cleartext `KEXINIT` and
-  reports the post-quantum key-exchange methods it advertises
-  (`mlkem768x25519-sha256`, `sntrup761x25519-sha512`).
-- A **support matrix** across the ML-KEM key-exchange groups: `X25519MLKEM768`,
-  `SecP256r1MLKEM768`, `SecP384r1MLKEM1024`, and the deprecated
-  `X25519Kyber768Draft00` (best-effort; a negative for the legacy group is not
-  authoritative).
-- TLS version, cipher suite, and the certificate's **signature algorithm** +
-  expiry (context — post-quantum certificate signatures are essentially not
-  deployed yet, and forged signatures are not an HNDL threat).
+- **TLS services**: implicit TLS on `HTTPS`, `SMTPS`, `IMAPS`, `POP3S`, `FTPS`,
+  `LDAPS`, `DoT`, `MQTT`, `AMQP`, `MongoDB`, `Redis`, and `Syslog-TLS`; STARTTLS on
+  `SMTP` (25), `SMTP-submission` (587), `IMAP` (143), `POP3` (110), `FTP` (21), and
+  `PostgreSQL` (5432).
+- **SSH** on port 22, which covers SSH, SFTP, SCP, and Git-over-SSH.
+- **Any port you name** (`host:port`). The protocol is detected from the server's
+  greeting: `SSH-` means SSH, `220` means SMTP or FTP, `* OK` means IMAP, `+OK` means
+  POP3, and a silent server is implicit TLS or PostgreSQL.
+- **Role presets** select part of the catalog: `web`, `mail`, `remote`, `data`,
+  `infra`, and `all` (the default).
+- The ML-KEM group matrix: `X25519MLKEM768`, `SecP256r1MLKEM768`,
+  `SecP384r1MLKEM1024`, and the deprecated `X25519Kyber768Draft00` (for which a "no"
+  is not authoritative).
+- Context: TLS version, cipher suite, certificate CN, signature algorithm and expiry,
+  and the SSH or mail server banner.
+
+Each service gets one of five states:
+- **Post-quantum**
+- **Classical**
+- **Closed**: connection refused. Nothing is listening, so there is nothing to harvest.
+- **No response**: filtered or down.
+- **Error**: the service is reachable but the probe failed. A server that refuses
+  STARTTLS is reported as **plaintext**.
+
+## How it works
+
+For every TLS service, two independent checks run:
+
+1. **Offer test.** A hand-built TLS 1.3 ClientHello offers the ML-KEM group and
+   classical X25519, each with a valid key generated by `crypto/mlkem`, which is what
+   current browsers send. The ServerHello names the group the server picked. That is
+   the server's own answer, so nothing is inferred. The offer lists AES-256 first,
+   so a server that picks AES-128 is showing its own preference.
+2. **Forced test.** A second, independent TLS client (Go's `crypto/tls`) completes a
+   full handshake offering *only* `X25519MLKEM768`. It can complete only if the
+   server really does ML-KEM.
+
+For SSH, pqscan reads the server's cleartext `KEXINIT`, which is its complete list of
+key-exchange methods. SSH uses the first method in the client's list that the server
+supports (RFC 4253 §7.1), so the list is authoritative.
+
+Before any result is trusted, four **engine controls** run against local reference
+servers with known answers:
+- an ML-KEM TLS server must read post-quantum, and a classical one must read classical;
+- the same for SSH.
+
+The web server refuses to start if a control fails, and `--selftest` prints each
+control's expected and actual result.
+
+## Reading results
+
+A scanner can't know the ground truth, but it can rule out each kind of error with
+independent evidence. Every result carries an **assessment**: confidence, the checks
+behind it, an answer to "could this be a false positive/negative?", and its limits.
+
+| | Server really uses ML-KEM | Server doesn't |
+|---|---|---|
+| **Says post-quantum** | True positive | **False positive.** Ruled out when the forced test completes, since a server without ML-KEM can't finish it. The negative control rules out a systematic false positive. If the tests disagree, the result is *Unverified*. |
+| **Says classical** | **False negative.** Ruled out when ML-KEM, offered first with a valid key, is refused and the forced test is refused too. The positive control rules out a systematic false negative. One cause can't be seen from the server: a middlebox stripping ML-KEM offers. `--reference` detects that. | True negative |
+
+Confidence levels:
+- **Confirmed**: two independent checks agree, or the protocol makes one check
+  authoritative (the SSH method list, a refused STARTTLS).
+- **One check**: the decisive check succeeded but the confirming one couldn't run.
+- **Some clients**: ML-KEM works only in the P-256/P-384 hybrids, so browsers offering
+  `X25519MLKEM768` still get classical key exchange.
+- **Unverified**: the checks disagreed, usually because several differently
+  configured servers share one address.
+- **Low**: an engine control failed, or the network path strips ML-KEM.
+
+When the offer test reads classical but the forced test completes, the server
+**supports ML-KEM but prefers classical**. Clients offering both get classical key
+exchange, and the fix is to reorder the server's groups.
+
+**Network path.** A TLS-inspecting proxy or middlebox between the scanner and the
+target can make every server look classical. Start with
+`--reference <server known to support ML-KEM>`. It must be reached the same way as
+your targets; a reference on the same machine only covers local targets. If the
+reference reads classical, classical results are flagged as possible false negatives.
+
+Every result is valid for the IP:port shown, from this scanner, at scan time.
+
+## Recommendations
+
+Each scan produces prioritized recommendations derived from its evidence, with exact
+versions and copyable configuration:
+
+- **Now** (HNDL exposure or plaintext):
+  - enable TLS where traffic is plaintext;
+  - enable TLS 1.3;
+  - enable, prefer, or add `X25519MLKEM768` (OpenSSL 3.5+, nginx `ssl_ecdh_curve`,
+    Apache `SSLOpenSSLConfCmd Groups`, Postfix `tls_eecdh_auto_curves`, Dovecot
+    `ssl_curve_list`, PostgreSQL 18 `ssl_groups`);
+  - replace the Kyber draft group;
+  - upgrade OpenSSH or restore its post-quantum `KexAlgorithms`;
+  - check every server behind an address whose checks disagreed.
+- **Harden** (standards and compliance): add `mlkem768x25519-sha256` to SSH; add
+  ML-KEM-1024 and prefer AES-256 where CNSA 2.0 applies.
+- **Plan**: prepare certificates for ML-DSA (FIPS 204). This covers automating
+  issuance, finding pinned keys, and piloting on an internal CA. Longer RSA or ECC
+  keys don't help against Shor's algorithm.
+
+## Web UI and API
+
+The web UI does the following:
+- Streams results as each probe finishes, with a Stop button.
+- Groups services by result, collapsing closed and silent ports.
+- Shows each service's evidence and assessment.
+- Offers links, JSON download, and a print layout suitable for an audit record.
+
+API endpoints:
+- `GET /api/catalog`: the services, presets, and protocols, plus the engine controls.
+- `POST /api/scan {host, services?, protocol?}`: the full JSON report.
+- `POST /api/scan/stream`: the same, as NDJSON events (`start`, then one `service`
+  per probe, then `done`). Closing the connection stops the scan.
+- `POST /api/rollup`: the summary and recommendations for a stopped scan's partial
+  results.
 
 ### Future work (not yet implemented)
 
 - **QUIC / HTTP-3** (UDP 443). Requires hand-building a QUIC Initial packet:
-  HKDF initial secrets from the connection ID, AEAD payload encryption and header
-  protection, a CRYPTO frame carrying the ML-KEM ClientHello, then decrypting and
-  reassembling the server's response. Feasible with the standard library and
-  hermetically testable via `tls.QUICServer`; deferred as a separate effort.
-- **IKEv2 / IPsec** (UDP 500/4500, RFC 9370 additional key exchange). The
-  least-deployed family and the hardest to verify (no standard-library IKE server
-  to test against). WireGuard has no standardized PQC (reported N/A); OpenVPN runs
-  over TLS and is covered by the TLS family.
+  - HKDF initial secrets from the connection ID;
+  - AEAD payload encryption and header protection;
+  - a CRYPTO frame carrying the ML-KEM ClientHello;
+  - decrypting and reassembling the server's response.
 
-Both are deferred deliberately: this project holds a bar that **every probe ships
-with a hermetic test proving correctness**, and neither could be end-to-end
-verified in the environment this was built in (its egress does not carry PQC
-handshakes, and UDP is blocked). The verified TLS + SSH coverage already spans the
-large majority of real-world endpoints.
-
-## How it works
-
-For each post-quantum group, `pqscan` sends a hand-crafted TLS 1.3 ClientHello
-offering that group **and** a classical fallback (X25519), then reads which group
-the server selects from the (unencrypted) ServerHello and disconnects. It never
-completes the handshake and never uses the shared secret. Valid ML-KEM key shares
-are generated at runtime with the standard `crypto/mlkem` package, so a server
-cannot reject the offer as malformed. Go's `crypto/tls` natively speaks
-`X25519MLKEM768`; the other groups are hand-crafted because no TLS library will
-*offer* a group it cannot itself perform.
-
-The scanner **self-calibrates**: before trusting any verdict it probes a local,
-in-process TLS server that is known to support `X25519MLKEM768`. If the engine
-cannot detect PQC there, the web server refuses to start (`--selftest` runs the
-same check from the CLI).
-
-> Note: detecting *external* PQC requires network egress that carries the
-> post-quantum handshake. Some sandboxed environments negotiate only classical
-> groups regardless of the target; there, external scans read "not ready" even for
-> PQC-enabled sites, while the hermetic self-calibration still confirms the engine.
+  Feasible with the standard library and hermetically testable via `tls.QUICServer`.
+- **IKEv2 / IPsec** (UDP 500/4500, RFC 9370 additional key exchange). This is the
+  least-deployed family and the hardest to verify, since there is no standard-library
+  IKE server to test against. WireGuard has no standardized PQC. OpenVPN runs over
+  TLS and is covered by the TLS family.
 
 ## Standards & references
 
-- **TLS 1.3** — [RFC 8446](https://datatracker.ietf.org/doc/html/rfc8446); IANA
+- **TLS 1.3**: [RFC 8446](https://datatracker.ietf.org/doc/html/rfc8446) and the IANA
   [TLS Supported Groups](https://www.iana.org/assignments/tls-parameters/) registry.
-- **Hybrid key exchange in TLS 1.3** — `draft-ietf-tls-hybrid-design`; the ML-KEM
-  groups `X25519MLKEM768` / `SecP256r1MLKEM768` / `SecP384r1MLKEM1024` —
-  `draft-ietf-tls-ecdhe-mlkem`.
-- **NIST PQC** — [FIPS 203](https://doi.org/10.6028/NIST.FIPS.203) (ML-KEM),
-  [FIPS 204](https://doi.org/10.6028/NIST.FIPS.204) (ML-DSA),
-  [FIPS 205](https://doi.org/10.6028/NIST.FIPS.205) (SLH-DSA), FIPS 206/draft (FN-DSA).
-- **SSH** — [RFC 4253](https://datatracker.ietf.org/doc/html/rfc4253); PQC KEX
-  `sntrup761x25519-sha512` and `draft-ietf-sshm-mlkem-hybrid-kex`
-  (`mlkem768x25519-sha256`) — Phase 3.
-- **QUIC/TLS** — [RFC 9001](https://datatracker.ietf.org/doc/html/rfc9001) — Phase 4.
-- **IKEv2 multiple key exchange** — [RFC 9370](https://datatracker.ietf.org/doc/html/rfc9370) — Phase 5.
+- **Hybrid key exchange in TLS 1.3**: `draft-ietf-tls-hybrid-design`. The ML-KEM
+  groups `X25519MLKEM768`, `SecP256r1MLKEM768`, and `SecP384r1MLKEM1024` are defined
+  in `draft-ietf-tls-ecdhe-mlkem`.
+- **NIST PQC**:
+  - [FIPS 203](https://doi.org/10.6028/NIST.FIPS.203) (ML-KEM)
+  - [FIPS 204](https://doi.org/10.6028/NIST.FIPS.204) (ML-DSA)
+  - [FIPS 205](https://doi.org/10.6028/NIST.FIPS.205) (SLH-DSA)
+  - FIPS 206 draft (FN-DSA)
+- **SSH**: [RFC 4253](https://datatracker.ietf.org/doc/html/rfc4253). The PQC key
+  exchanges are `sntrup761x25519-sha512` and `mlkem768x25519-sha256`
+  (`draft-ietf-sshm-mlkem-hybrid-kex`).
+- **QUIC/TLS**: [RFC 9001](https://datatracker.ietf.org/doc/html/rfc9001) (future work).
+- **IKEv2 multiple key exchange**: [RFC 9370](https://datatracker.ietf.org/doc/html/rfc9370) (future work).
 - **NSA CNSA 2.0** migration timelines.
 
 ## FAQ
 
-**1. What does "quantum-safe" mean here?** That the service's TLS **key exchange**
-can use ML-KEM (post-quantum). That is the part with real urgency, because recorded
-handshakes are what HNDL harvests.
+**1. What does "post-quantum" mean here?** That the service's **key exchange** can
+use ML-KEM. That is the part with real urgency, because recorded handshakes are what
+HNDL harvests.
 
-**2. How do you *prove* ready-or-not?** By negotiation. The server authoritatively
-selects the key-exchange group in a live handshake; we offer post-quantum first and
-read its choice. It is the server's real behavior, not a claim.
+**2. How do you *prove* ready-or-not?** By negotiation, checked twice. The server
+names its chosen group in a live handshake, and a second, independent client
+confirms it with an ML-KEM-only handshake. See [Reading results](#reading-results).
 
 **3. What is Harvest-Now-Decrypt-Later?** Recording encrypted traffic today to
 decrypt it later, once a quantum computer can break classical (RSA/ECDH) key
 exchange. Post-quantum key exchange defeats it.
 
 **4. Which NIST PQC algorithms are covered?** Key exchange (ML-KEM) is probed
-directly across its TLS groups. Signatures (ML-DSA/SLH-DSA/FN-DSA) are reported via
-the certificate's signature algorithm; they are near-zero deployed and not an HNDL
-risk.
+directly across its TLS groups and SSH methods. Signatures (ML-DSA/SLH-DSA/FN-DSA)
+are reported through the certificate's signature algorithm. They are barely deployed
+yet and aren't an HNDL risk.
 
-**5. Which services are supported?** The TLS family (HTTPS and, via implicit TLS
-or STARTTLS, SMTP/IMAP/POP/FTP/LDAP/DoT/MQTT/AMQP/DBs) and SSH (covering
-SFTP/SCP/Git-over-SSH). QUIC/HTTP-3 and IKEv2 are documented future work.
+**5. Which services are supported?** The TLS family (implicit TLS and STARTTLS), SSH,
+and any port you name. QUIC/HTTP-3 and IKEv2 are future work.
 
-**6. What does "hand-craft the ClientHello" mean, and is it safe?** We build the
-handshake's first message byte by byte to offer groups a TLS library won't offer on
-its own, then read the server's pick. It needs no cryptography beyond a valid
-ML-KEM key (from `crypto/mlkem`), uses the public TLS 1.3 format, and is the
-standard technique used by TLS scanners.
+**6. What does "hand-craft the ClientHello" mean, and is it safe?** pqscan builds the
+handshake's first message byte by byte, so it can offer groups a TLS library won't
+offer on its own, then reads the server's pick. The only cryptography it needs is a
+valid ML-KEM key from `crypto/mlkem`. It uses the public TLS 1.3 format, and it is the
+standard technique TLS scanners use.
 
-**7. Why not just use OpenSSL or a TLS library?** A library only offers groups it
-can itself perform; Go's does only `X25519MLKEM768`. Hand-crafting lets us probe
-every group (and future ones) precisely, with no heavy dependency.
+**7. Why not just use OpenSSL or a TLS library?** A library offers only the groups it
+can perform itself, and Go's does only `X25519MLKEM768`. Hand-crafting probes every
+group. Go's library is still used as the independent second check.
 
 **8. Why Go?** Its standard `crypto/tls` speaks `X25519MLKEM768` natively and
-`crypto/mlkem` mints valid keys; strong concurrency and a single static binary suit
-a scanner. (Python is a viable fallback; Node cannot offer ML-KEM natively.)
+`crypto/mlkem` mints valid keys. Good concurrency and a single static binary suit a
+scanner.
 
-**9. Is generating/reusing the ML-KEM key safe?** Yes. We discard the shared secret
-and never decapsulate, so the key need not be secret; `crypto/mlkem` generates a
-fresh valid one per probe.
+**9. Is generating the ML-KEM key safe?** Yes. pqscan never decapsulates and throws
+the shared secret away. `crypto/mlkem` generates a fresh key for each probe.
 
-**10. Why is a "not ready" verdict trustworthy?** We offer post-quantum *first* with
-a valid key, so a classical result means the server would not use PQC in practice.
-Self-calibration confirms the engine reads a known PQC server correctly first.
+**10. Can a result be a false positive or false negative?** Each kind of error is
+ruled out by specific evidence, and every result says which checks passed (see
+[Reading results](#reading-results)). The one error the target can't reveal is a
+middlebox on your own path, which `--reference` detects.
 
-**11. Does it check certificate signatures?** It reports the served certificate's
-signature algorithm. PQC certificate signatures are essentially undeployed today.
+**11. Does it check certificate signatures?** It reports the certificate's signature
+algorithm and recommends preparing for ML-DSA. Post-quantum certificates are barely
+deployed yet.
 
-**12. Is this a scanning/hacking tool? Ethics & limits.** No. It reads only public
-handshake metadata, never exploits anything, and refuses non-public targets
-(loopback, private, link-local, cloud-metadata) with rate limiting. Scan only
-endpoints you are entitled to check.
+**12. Can I scan internal hosts, and does it work offline?** Yes to both. Private
+addresses, internal names (`mail.corp.local`), and non-standard ports are
+first-class. The web UI loads nothing from outside the scanner (it enforces a
+same-origin Content-Security-Policy), and the scanner contacts nothing on its own
+unless you set `--reference`. Use `--public-only` if you expose the web server to
+the internet, so it can't be used to probe your internal network.
 
-**13. What does a result *not* tell me?** It reflects this endpoint at this moment;
-large sites behind many servers can vary, and configurations change.
+**13. Is this a hacking tool?** No. It reads only handshake metadata that the servers
+send to any client, and it exploits nothing. Scan only systems you are authorized
+to test.
 
-**14. Hybrid vs pure PQC?** All current TLS PQC groups are *hybrid* — a classical
-group (X25519/P-256) combined with ML-KEM — so security holds even if one component
-is broken. That is the recommended posture today.
+**14. What does a result *not* tell me?** It reflects this endpoint, from this
+scanner, at this moment. Several servers behind one name can differ; pqscan flags
+disagreement it sees as *Unverified*.
 
-**15. Who is this for?** PQC-migration engineers, DevOps/SRE (CI gating),
-compliance/GRC and auditors, pentesters and vendor-risk assessments, sysadmins of
-mail/SSH/DB servers, and anyone learning about PQC and HNDL.
+**15. Hybrid vs pure PQC?** All current TLS PQC groups are *hybrid*: a classical group
+(X25519/P-256) combined with ML-KEM. The connection stays secure if either component
+holds, which is the recommended posture today.
+
+**16. Who is this for?**
+- PQC-migration engineers
+- DevOps/SRE (CI gating through exit codes and JSON)
+- compliance, GRC, and auditors (the evidence and the printable report)
+- pentesters and vendor-risk assessors
+- administrators of mail, SSH, and database servers
+- anyone learning about PQC and HNDL
