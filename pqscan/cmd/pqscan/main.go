@@ -6,6 +6,7 @@
 //	pqscan 10.0.0.5:2222                   # one port, protocol auto-detected
 //	pqscan --targets estate.txt            # many hosts, host:ports, and CIDRs
 //	pqscan inspect /srv/backups ~/.ssh     # files, archives, and mail at rest
+//	pqscan observe --keylog keys.log cap.pcap  # traffic: every handshake, and data inside
 //	pqscan --json host
 package main
 
@@ -32,6 +33,8 @@ func main() {
 		switch os.Args[1] {
 		case "inspect":
 			os.Exit(runInspect(os.Args[2:]))
+		case "observe":
+			os.Exit(runObserve(os.Args[2:]))
 		case "probe":
 			os.Args = append(os.Args[:1], os.Args[2:]...)
 		}
@@ -47,7 +50,7 @@ func main() {
 	samples := flag.Int("samples", services.DefaultSamples, "repeat the decisive ML-KEM offer this many times per TLS service (reveals mixed pools)")
 	maxAddrs := flag.Int("max-addresses", services.DefaultMaxAddresses, "probe up to this many addresses per name (reveals mixed fleets)")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: pqscan [probe] [flags] <host | host:port>\n       pqscan [probe] [flags] --targets <file>\n       pqscan inspect [flags] <path>...\n\nChecks whether services use post-quantum key exchange (ML-KEM).\n\nflags:\n")
+		fmt.Fprintf(os.Stderr, "usage: pqscan [probe] [flags] <host | host:port>\n       pqscan [probe] [flags] --targets <file>\n       pqscan inspect [flags] <path>...\n       pqscan observe [flags] <capture>...\n\nChecks whether services use post-quantum key exchange (ML-KEM).\n\nflags:\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()

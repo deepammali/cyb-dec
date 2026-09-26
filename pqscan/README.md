@@ -22,6 +22,7 @@ go run ./cmd/pqscan 10.0.0.5:2222                    # one port, protocol auto-d
 go run ./cmd/pqscan --targets estate.txt             # an estate: hosts, host:port, URLs, CIDRs
 go run ./cmd/pqscan --json host                      # machine-readable report
 go run ./cmd/pqscan inspect /srv/backups ~/.ssh      # data at rest: files, archives, mail
+go run ./cmd/pqscan observe --keylog keys.log cap.pcap # data in transit: every handshake in a capture
 go run ./cmd/pqscan --selftest                       # run the engine controls and exit
 
 # Web app (UI + JSON API)
@@ -188,6 +189,43 @@ signing-key migration.
 algorithms it declares; nothing inside is opened. Encryption inside databases and
 applications isn't visible from their files.
 
+## Data in transit: `pqscan observe`
+
+A probe measures one connection that the scanner itself makes. A packet capture
+shows every connection that actually happened: clients that never offer ML-KEM,
+internal hops behind proxies and load balancers, VPN tunnels, and plaintext
+protocols. Handshakes establish keys in the clear, so `pqscan observe` reads them
+from classic pcap or pcapng captures (`tcpdump -w`, Wireshark, dumpcap):
+
+| Protocol | What is read | Post-quantum when |
+|---|---|---|
+| TLS over TCP (also after STARTTLS and PostgreSQL SSLRequest) | ClientHello groups and key shares, ServerHello and HelloRetryRequest; TLS 1.2 ServerKeyExchange and the server certificate | The server selects an ML-KEM group. Otherwise the report says whether the **server** declined an offered ML-KEM group, the **client** never offered one, or TLS 1.2 or static RSA was negotiated |
+| QUIC (HTTP/3) | Initial packets, decrypted with keys derived from the connection ID (RFC 9001) | As for TLS |
+| SSH | Both KEXINIT lists; the method used is the first client method the server also lists | `mlkem768x25519-sha256` or `sntrup761x25519-sha512` is negotiated |
+| IKEv2 | IKE_SA_INIT proposals and the responder's choice, with RFC 9370 additional key exchanges | ML-KEM (Key Exchange Method IDs 35–37) is chosen |
+| WireGuard | Handshake messages | Never on its own (X25519); a pre-shared key isn't visible |
+| Plaintext HTTP, SMTP, IMAP, POP3, FTP, LDAP, Telnet, PostgreSQL | The application data | Never; the data is searched like files (HTTP bodies and headers, SMTP DATA) |
+
+TCP streams are reassembled (out-of-order segments, retransmissions, captures that
+start mid-connection). Identical connections are grouped with a count, and every
+group lists its evidence: offered and selected groups, versions, cipher suite,
+SNI, ALPN, and the server certificate where visible.
+
+**Inside TLS 1.3.** With a key log in the `SSLKEYLOGFILE` format (set the variable
+for curl, browsers, and most TLS libraries, or use Go's `tls.Config.KeyLogWriter`),
+`--keylog` decrypts the TLS 1.3 sessions it has secrets for, in memory: the
+server's certificate and CertificateVerify signature scheme become visible, and
+the application data (split into HTTP messages) goes through the same detectors as
+`inspect`, so JWE tokens and OpenPGP, S/MIME, or age files carried over TLS are
+found. A connection can be post-quantum on the wire and still carry data that is
+exposed at rest; the report shows both.
+
+**Limits.** Only what the capture contains: connections captured after their
+handshake can't be assessed, and one-sided captures show only the client's offer.
+IP fragments are skipped; QUIC is read from its Initial packets only. This version
+decrypts TLS 1.3 AES-GCM sessions; TLS 1.2 key log lines and ChaCha20-Poly1305
+sessions are reported as not decrypted.
+
 ## Recommendations
 
 Each scan produces prioritized recommendations derived from its evidence, with exact
@@ -212,10 +250,12 @@ versions and copyable configuration:
 
 ## Web UI and API
 
-The web UI has two tabs: **Hosts** (services and connections) and **Files** (data
-at rest). In the Files tab you drop files or whole folders; they are uploaded to
-this pqscan server only, parsed in memory, and never written to disk (the server
+The web UI has three tabs: **Hosts** (live probing of services), **Files** (data at
+rest), and **Capture** (data in transit). In the Files tab you drop files or whole
+folders; in the Capture tab, a capture and an optional key log. Uploads go to this
+pqscan server only, are parsed in memory, and are never written to disk (the server
 never reads its own filesystem by path, so path scanning stays in the CLI).
+Captures stream through the analyzer, so only per-connection buffers are held.
 
 The Hosts tab does the following:
 - Scans one host, or a target list (hosts, `host:port`, URLs, CIDRs) with an estate
@@ -242,20 +282,21 @@ API endpoints:
 - `POST /api/inspect` (multipart/form-data, one `file` part per file; the filename
   may carry a relative path): the data-at-rest report. Uploads over `--max-upload`
   are refused with 413.
+- `POST /api/observe` (multipart/form-data: one or more `capture` parts, and an
+  optional `keylog` part): the traffic report.
 
 ### Future work (not yet implemented)
 
-- **QUIC / HTTP-3** (UDP 443). Requires hand-building a QUIC Initial packet:
-  - HKDF initial secrets from the connection ID;
-  - AEAD payload encryption and header protection;
-  - a CRYPTO frame carrying the ML-KEM ClientHello;
-  - decrypting and reassembling the server's response.
-
-  Feasible with the standard library and hermetically testable via `tls.QUICServer`.
-- **IKEv2 / IPsec** (UDP 500/4500, RFC 9370 additional key exchange). This is the
-  least-deployed family and the hardest to verify, since there is no standard-library
-  IKE server to test against. WireGuard has no standardized PQC. OpenVPN runs over
-  TLS and is covered by the TLS family.
+- **Active QUIC / HTTP-3 probing** (UDP 443). `observe` already reads QUIC Initial
+  packets passively; probing a server needs pqscan to build and protect its own
+  Initial packet, then reassemble the server's reply. Testable with `tls.QUICServer`.
+- **Active IKEv2 probing** (UDP 500/4500). `observe` already reads IKE_SA_INIT
+  passively, including RFC 9370 additional key exchanges; probing needs an
+  IKE_SA_INIT sender, and there is no standard-library IKE peer to test against.
+- **Key-log decryption of TLS 1.2 and ChaCha20-Poly1305 sessions**, and of QUIC
+  handshake and 1-RTT packets.
+- **Certificate trust** (chain validation) and ML-DSA certificate chains beyond
+  reporting their algorithms.
 
 ## Standards & references
 

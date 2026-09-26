@@ -4,5 +4,5 @@ package webui
 
 import "embed"
 
-//go:embed index.html style.css app.js core.js hosts.js files.js
+//go:embed index.html style.css app.js core.js hosts.js files.js capture.js
 var Files embed.FS

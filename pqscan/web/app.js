@@ -2,6 +2,7 @@
 import { $, showFormError } from './core.js';
 import { initHosts } from './hosts.js';
 import { initFiles } from './files.js';
+import { initCapture } from './capture.js';
 
 const TABS = {
   hosts: {
@@ -13,6 +14,11 @@ const TABS = {
     title: 'Check data at rest for quantum exposure',
     lede: 'pqscan reads the headers that encrypted files, keys, and certificates declare, and shows which data a future quantum computer could decrypt from a copy taken today.',
     how: '#files-how', howLabel: 'How files are inspected',
+  },
+  capture: {
+    title: 'Check traffic for quantum-exposed connections',
+    lede: 'pqscan reads every handshake in a packet capture and shows how each connection set up its keys: which were post-quantum, which were not, and whether the client or the server was the reason.',
+    how: '#cap-how', howLabel: 'How traffic is analyzed',
   },
 };
 
@@ -29,8 +35,8 @@ function selectTab(name, focus) {
   $('intro-lede').textContent = t.lede;
   $('how-link').textContent = t.howLabel;
   $('how-link').href = t.how;
-  if (name === 'files') history.replaceState(null, '', '#files');
-  else if (location.hash === '#files') history.replaceState(null, '', location.pathname + location.search);
+  if (name !== 'hosts') history.replaceState(null, '', `#${name}`);
+  else if (location.hash) history.replaceState(null, '', location.pathname + location.search);
   if (focus) $(`tab-${name}`).focus();
 }
 
@@ -47,7 +53,8 @@ function initTabs() {
       selectTab(names[(next + names.length) % names.length], true);
     });
   }
-  selectTab(location.hash === '#files' ? 'files' : 'hosts');
+  const fromHash = location.hash.slice(1);
+  selectTab(names.includes(fromHash) ? fromHash : 'hosts');
 }
 
 (async function boot() {
@@ -63,4 +70,5 @@ function initTabs() {
   }
   initHosts(catalog);
   initFiles(catalog);
+  initCapture(catalog);
 })();

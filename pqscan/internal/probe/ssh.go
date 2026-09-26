@@ -16,6 +16,12 @@ var KnownSSHPQKex = []string{
 	"sntrup761x25519-sha512@openssh.com", // OpenSSH vendor name
 }
 
+// IsSSHPQKex reports whether an SSH key-exchange method name is post-quantum.
+func IsSSHPQKex(name string) bool { return isSSHPQKex(name) }
+
+// IsSSHPseudoKex reports extension markers listed among key-exchange methods.
+func IsSSHPseudoKex(name string) bool { return isSSHPseudoKex(name) }
+
 func isSSHPQKex(name string) bool {
 	n := strings.ToLower(name)
 	return strings.Contains(n, "mlkem") || strings.Contains(n, "sntrup") || strings.Contains(n, "kyber")

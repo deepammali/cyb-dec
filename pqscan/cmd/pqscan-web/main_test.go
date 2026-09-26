@@ -305,3 +305,68 @@ func TestInspectUpload(t *testing.T) {
 		t.Fatalf("empty upload: status %d, want 400", none.StatusCode)
 	}
 }
+
+// A minimal pcap: one WireGuard handshake initiation over UDP.
+func wireguardPcap() []byte {
+	var b bytes.Buffer
+	b.Write([]byte{0xd4, 0xc3, 0xb2, 0xa1, 2, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0, 0, 1, 0, 0, 0})
+	payload := append([]byte{1, 0, 0, 0}, make([]byte, 144)...)
+	udp := append([]byte{0x9c, 0x40, 0xca, 0x6c, 0, byte(8 + len(payload)), 0, 0}, payload...)
+	ip := []byte{0x45, 0, 0, byte(20 + len(udp)), 0, 0, 0, 0, 64, 17, 0, 0, 10, 0, 0, 5, 10, 0, 0, 1}
+	frame := append(append(append(make([]byte, 12), 0x08, 0x00), ip...), udp...)
+	rec := make([]byte, 16)
+	rec[8], rec[12] = byte(len(frame)), byte(len(frame))
+	b.Write(rec)
+	b.Write(frame)
+	return b.Bytes()
+}
+
+func postParts(t *testing.T, url string, parts map[string][]byte) *http.Response {
+	t.Helper()
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	for field, data := range parts {
+		w, _ := mw.CreateFormFile(field, field+".bin")
+		w.Write(data)
+	}
+	mw.Close()
+	resp, err := http.Post(url, mw.FormDataContentType(), &body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func TestObserveUpload(t *testing.T) {
+	srv := testServer(t, false)
+	resp := postParts(t, srv.URL+"/api/observe", map[string][]byte{"capture": wireguardPcap()})
+	var r struct {
+		Packets int    `json:"packets"`
+		Verdict string `json:"verdict"`
+		Groups  []struct {
+			Protocol string `json:"protocol"`
+			Class    string `json:"class"`
+		} `json:"groups"`
+	}
+	json.NewDecoder(resp.Body).Decode(&r)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || r.Packets != 1 || r.Verdict != "not_ready" || len(r.Groups) != 1 || r.Groups[0].Protocol != "WireGuard" {
+		t.Fatalf("status %d, report %+v", resp.StatusCode, r)
+	}
+	for name, parts := range map[string]map[string][]byte{
+		"not a capture": {"capture": []byte("hello")},
+		"bad key log":   {"capture": wireguardPcap(), "keylog": []byte("nothing useful")},
+		"no capture":    {"keylog": []byte("CLIENT_TRAFFIC_SECRET_0 " + strings.Repeat("ab", 32) + " " + strings.Repeat("cd", 32))},
+	} {
+		resp := postParts(t, srv.URL+"/api/observe", parts)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: status %d, want 400", name, resp.StatusCode)
+		}
+	}
+	big := postParts(t, srv.URL+"/api/observe", map[string][]byte{"capture": append(wireguardPcap(), make([]byte, 2<<20)...)})
+	big.Body.Close()
+	if big.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("oversized capture: status %d, want 413", big.StatusCode)
+	}
+}

@@ -24,8 +24,9 @@
     </section>
 
     <div class="tabs" id="tabs" role="tablist" aria-label="What to check">
-      <button type="button" role="tab" id="tab-hosts" aria-controls="panel-hosts" aria-selected="true">Hosts <span class="tab-sub">in transit</span></button>
+      <button type="button" role="tab" id="tab-hosts" aria-controls="panel-hosts" aria-selected="true">Hosts <span class="tab-sub">live probe</span></button>
       <button type="button" role="tab" id="tab-files" aria-controls="panel-files" aria-selected="false" tabindex="-1">Files <span class="tab-sub">at rest</span></button>
+      <button type="button" role="tab" id="tab-capture" aria-controls="panel-capture" aria-selected="false" tabindex="-1">Capture <span class="tab-sub">in transit</span></button>
     </div>
 
     <div id="announcer" class="sr-only" aria-live="polite"></div>
@@ -198,6 +199,64 @@
           </table>
         </div>
         <p class="prose small"><strong>Limits.</strong> A container encrypted with a password shows only the algorithms it declares; what is inside isn't opened. Encryption inside databases and applications isn't visible from their files. Files over the per-file limit are read head-only, which covers every header format above.</p>
+      </section>
+    </div>
+
+    <div id="panel-capture" role="tabpanel" aria-labelledby="tab-capture" hidden>
+      <form id="cap-form" autocomplete="off" novalidate>
+        <div id="cap-drop" class="dropzone">
+          <p class="drop-title">Drop a packet capture here</p>
+          <p class="drop-sub">pcap or pcapng from tcpdump, Wireshark, or dumpcap. Add a key log to look inside TLS 1.3 sessions.</p>
+          <div class="pick-row">
+            <label class="ghost pick"><input id="cap-pick" type="file" multiple accept=".pcap,.pcapng,.cap,.dmp" class="sr-only">Choose a capture</label>
+            <label class="ghost pick"><input id="keylog-pick" type="file" class="sr-only">Add a key log (optional)</label>
+          </div>
+        </div>
+        <div class="selection-row">
+          <p id="cap-selection" class="selection" aria-live="polite"></p>
+          <button id="cap-clear" type="button" class="link" hidden>Clear</button>
+        </div>
+        <div class="files-actions">
+          <button id="cap-go" type="submit" class="primary" disabled>Analyze</button>
+          <button id="cap-stop" type="button" class="secondary" hidden>Stop</button>
+          <span id="cap-limit" class="field-note"></span>
+        </div>
+        <div id="cap-progress" class="progress" hidden>
+          <div class="bar" role="progressbar" aria-label="Upload" aria-valuemin="0" aria-valuemax="100"><span class="fill"></span></div>
+          <span class="progress-text"></span>
+        </div>
+        <p id="cap-error" class="form-error" role="alert" hidden></p>
+        <p class="hint">The capture and key log go only to this pqscan server, are processed in memory, and are never stored. Capture with <code>tcpdump -i any -w capture.pcap</code>; get a key log by setting <code>SSLKEYLOGFILE=keys.log</code> for curl, browsers, and most TLS libraries.</p>
+      </form>
+
+      <section id="cap-report" class="report" hidden>
+        <div id="cap-verdict" class="verdict"></div>
+        <section id="cap-list" class="services" aria-labelledby="cap-list-title"></section>
+        <section id="cap-artifacts" class="services" hidden></section>
+        <section id="cap-recs" class="recs" aria-labelledby="cap-recs-title"></section>
+      </section>
+
+      <section id="cap-how" class="how" aria-labelledby="cap-how-title">
+        <h2 id="cap-how-title">How traffic is analyzed</h2>
+        <div class="prose">
+          <p>Every handshake sets up its keys in the clear, so a capture shows what each connection negotiated and what each client offered: including clients a server scan never sees, and internal hops behind proxies and load balancers.</p>
+        </div>
+        <div class="matrix-wrap">
+          <table class="formats">
+            <caption class="sr-only">What pqscan reads for each protocol</caption>
+            <thead><tr><th scope="col">Protocol</th><th scope="col">What is read</th><th scope="col">Post-quantum when</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">TLS over TCP</th><td>ClientHello groups and key shares, ServerHello and HelloRetryRequest; TLS 1.2 ServerKeyExchange and certificate. Works after STARTTLS and PostgreSQL SSLRequest.</td><td>The server selects an ML-KEM group (<code>X25519MLKEM768</code> and the other hybrids). If it doesn't, the report says whether the server declined or the client never offered.</td></tr>
+              <tr><th scope="row">QUIC (HTTP/3)</th><td>Initial packets, whose keys derive from the connection ID in the clear (RFC 9001)</td><td>As for TLS.</td></tr>
+              <tr><th scope="row">SSH</th><td>Both KEXINIT method lists; the method used is the first in the client's list that the server also lists</td><td><code>mlkem768x25519-sha256</code> or <code>sntrup761x25519-sha512</code> is negotiated.</td></tr>
+              <tr><th scope="row">IKEv2 (IPsec)</th><td>IKE_SA_INIT proposals and the responder's choice, including RFC 9370 additional key exchanges</td><td>ML-KEM-512/768/1024 (IDs 35–37) is chosen.</td></tr>
+              <tr><th scope="row">WireGuard</th><td>Handshake messages</td><td>Never on its own: WireGuard uses X25519. A pre-shared key can add a layer, but it isn't visible.</td></tr>
+              <tr><th scope="row">Plaintext</th><td>HTTP, SMTP, IMAP, POP3, FTP, LDAP, Telnet, and PostgreSQL without TLS</td><td>Never: readable today. The data they carry is searched like files.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="prose small"><strong>Inside TLS.</strong> With a key log (<code>SSLKEYLOGFILE</code> format) from your own clients or proxies, TLS 1.3 sessions using AES-GCM are decrypted in memory: the server's certificate and signature become visible, and HTTP messages are searched for encrypted artifacts such as JWE tokens and OpenPGP, S/MIME, or age files. TLS 1.2 and ChaCha20-Poly1305 sessions aren't decrypted in this version.</p>
+        <p class="prose small"><strong>Limits.</strong> Only what the capture contains: a connection captured after its handshake can't be assessed, and one-sided captures show only the client's offer. IP fragments are skipped. QUIC is read from its Initial packets only.</p>
       </section>
     </div>
   </main>

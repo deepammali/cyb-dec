@@ -129,6 +129,16 @@ button { font: inherit; cursor: pointer; }
 .formats th, .formats td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--line); }
 .formats thead th { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-faint); }
 
+/* connections */
+.n-plaintext, .n-classical { --c: var(--bad); --cb: var(--bad-bg); }
+.n-unknown { --c: var(--warn); --cb: var(--warn-bg); }
+.n-pq { --c: var(--pq); --cb: var(--pq-bg); }
+.svc-head.conn-head, .row.conn-row { grid-template-columns: 170px minmax(90px, .8fr) minmax(170px, 1.6fr) minmax(130px, 1.1fr) 56px; }
+.row.conn-row .c-status { display: flex; align-items: center; gap: 8px; }
+.c-count { font: 13px var(--mono); color: var(--ink-soft); text-align: right; }
+.row.static .c-status { padding-left: 18px; }
+.in-traffic .groups li { font-size: 14px; }
+
 /* findings */
 .k-exposed, .k-weak { --c: var(--bad); --cb: var(--bad-bg); }
 .k-inventory { --c: var(--warn); --cb: var(--warn-bg); }
@@ -334,6 +344,13 @@ button.row:hover { background: var(--surface-2); }
   .c-exposed::after { content: " exposed"; font-family: var(--sans); }
   .host-detail { padding-inline: 8px; }
   .row.find-row { grid-template-columns: 1fr; grid-template-areas: "status" "format" "kex" "path"; }
+  .row.conn-row { grid-template-columns: 1fr auto; grid-template-areas: "status count" "format format" "path path" "kex kex"; }
+  .row.conn-row .c-status { grid-area: status; justify-self: start; }
+  .conn-row .c-format { grid-area: format; }
+  .conn-row .c-path { grid-area: path; padding-left: 18px; }
+  .row.conn-row .c-kex { grid-area: kex; padding-left: 18px; }
+  .c-count { grid-area: count; }
+  .row.static .c-status { padding-left: 0; }
   .find-row .c-status { grid-area: status; justify-self: start; }
   .c-format { grid-area: format; padding-left: 18px; }
   .find-row .c-kex { grid-area: kex; padding-left: 18px; }

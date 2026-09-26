@@ -20,6 +20,7 @@ import (
 	webui "pqscan/web"
 
 	"pqscan/internal/inspect"
+	"pqscan/internal/observe"
 	"pqscan/internal/probe"
 	"pqscan/internal/report"
 	"pqscan/internal/safety"
@@ -77,7 +78,7 @@ func main() {
 	maxHosts := flag.Int("max-hosts", 256, "cap on hosts an estate target list (CIDRs included) may expand to")
 	samples := flag.Int("samples", services.DefaultSamples, "repeat the decisive ML-KEM offer this many times per TLS service (reveals mixed pools)")
 	maxAddrs := flag.Int("max-addresses", services.DefaultMaxAddresses, "probe up to this many addresses per name (reveals mixed fleets)")
-	maxUpload := flag.Int64("max-upload", 200, "MB accepted per file-inspection upload (held in memory, never written to disk)")
+	maxUpload := flag.Int64("max-upload", 200, "MB accepted per file or capture upload (processed in memory, never written to disk)")
 	flag.Parse()
 
 	controls := probe.RunControls()
@@ -172,6 +173,8 @@ func newMux(cfg config) http.Handler {
 		}
 		writeJSON(w, http.StatusOK, in.Report())
 	})
+
+	mux.HandleFunc("POST /api/observe", observeHandler(cfg))
 
 	mux.HandleFunc("POST /api/scan", func(w http.ResponseWriter, r *http.Request) {
 		host, svcs, ok := cfg.admit(w, r)
@@ -290,6 +293,64 @@ func newMux(cfg config) http.Handler {
 	})
 
 	return securityHeaders(mux)
+}
+
+// observeHandler analyzes uploaded captures. The capture streams through the
+// analyzer part by part, so only per-connection handshake and payload buffers
+// are held, not the file; a key log part (optional) decrypts TLS 1.3 sessions.
+func observeHandler(cfg config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !cfg.limiter.Allow(clientIP(r)) {
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate limit exceeded, try again shortly"})
+			return
+		}
+		rc := http.NewResponseController(w)
+		rc.SetReadDeadline(time.Now().Add(30 * time.Minute))
+		rc.SetWriteDeadline(time.Now().Add(35 * time.Minute))
+		r.Body = http.MaxBytesReader(w, r.Body, cfg.maxUpload)
+		mr, err := r.MultipartReader()
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "expected a multipart/form-data upload"})
+			return
+		}
+		a := observe.New(r.Context(), observe.Options{})
+		captures := 0
+		for {
+			part, err := mr.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				uploadError(w, err, cfg.maxUpload)
+				return
+			}
+			switch part.FormName() {
+			case "capture":
+				if err := a.Add(part); err != nil {
+					var tooBig *http.MaxBytesError
+					if errors.As(err, &tooBig) {
+						uploadError(w, err, cfg.maxUpload)
+						return
+					}
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("%s: %v", uploadName(part.Header.Get("Content-Disposition"), captures), err)})
+					return
+				}
+				captures++
+			case "keylog":
+				k, err := observe.ParseKeyLog(io.LimitReader(part, 64<<20))
+				if err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": "key log: " + err.Error()})
+					return
+				}
+				a.SetKeyLog(k)
+			}
+		}
+		if captures == 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no capture was uploaded"})
+			return
+		}
+		writeJSON(w, http.StatusOK, a.Report())
+	}
 }
 
 func uploadError(w http.ResponseWriter, err error, limit int64) {
