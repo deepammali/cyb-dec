@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"net"
 )
 
 // helloRetryRandom is the fixed SHA-256 value a TLS 1.3 server puts in the
@@ -68,7 +69,12 @@ func buildClientHello(serverName string, groups ...uint16) ([]byte, error) {
 	}
 	ks := ext(0x0033, append(u16(uint16(kse.Len())), kse.Bytes()...))
 
-	exts := bytes.Join([][]byte{sni, sv, sg, sa, ks}, nil)
+	// RFC 6066 forbids IP literals in SNI; omit it when targeting an address.
+	parts := [][]byte{sni, sv, sg, sa, ks}
+	if net.ParseIP(serverName) != nil || serverName == "" {
+		parts = parts[1:]
+	}
+	exts := bytes.Join(parts, nil)
 
 	var body bytes.Buffer
 	body.Write(u16(0x0303)) // legacy_version

@@ -12,12 +12,65 @@ import (
 
 	"pqscan/internal/probe"
 	"pqscan/internal/safety"
+	"pqscan/internal/services"
 )
+
+func TestEstateStream(t *testing.T) {
+	pq := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer pq.Close()
+	_, port, _ := net.SplitHostPort(pq.Listener.Addr().String())
+	srv := testServer(t, false)
+
+	body := `{"targets":"# two targets\n127.0.0.1:` + port + `\n127.0.0.1:1\n","protocol":"auto"}`
+	resp, err := http.Post(srv.URL+"/api/estate/stream", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	count := map[string]int{}
+	var done struct {
+		Report struct {
+			Targets int `json:"targets"`
+			Summary struct {
+				HostsReady        int `json:"hostsReady"`
+				HostsUndetermined int `json:"hostsUndetermined"`
+			} `json:"summary"`
+		} `json:"report"`
+	}
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 1<<20), 4<<20)
+	for sc.Scan() {
+		var ev struct {
+			Type string `json:"type"`
+		}
+		json.Unmarshal(sc.Bytes(), &ev)
+		count[ev.Type]++
+		if ev.Type == "done" {
+			json.Unmarshal(sc.Bytes(), &done)
+		}
+	}
+	if count["start"] != 1 || count["host-start"] != 2 || count["host-done"] != 2 || count["done"] != 1 {
+		t.Fatalf("events = %v", count)
+	}
+	if done.Report.Targets != 2 || done.Report.Summary.HostsReady != 1 || done.Report.Summary.HostsUndetermined != 1 {
+		t.Fatalf("estate = %+v", done.Report)
+	}
+
+	// A CIDR over the cap is refused before anything is probed.
+	resp2, err := http.Post(srv.URL+"/api/estate/stream", "application/json", strings.NewReader(`{"targets":"10.0.0.0/24"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusBadRequest {
+		t.Fatalf("oversized CIDR: status %d, want 400", resp2.StatusCode)
+	}
+}
 
 func testServer(t *testing.T, publicOnly bool) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(newMux(config{publicOnly: publicOnly, timeout: 3 * time.Second, limiter: safety.NewRateLimiter(100, time.Minute),
-		controls: probe.RunControls()}))
+		opts: services.Options{Timeout: 3 * time.Second}, maxHosts: 16, controls: probe.RunControls()}))
 	t.Cleanup(srv.Close)
 	return srv
 }

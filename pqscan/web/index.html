@@ -24,14 +24,27 @@
     </section>
 
     <form id="scan-form" autocomplete="off" novalidate>
+      <fieldset class="mode">
+        <legend class="sr-only">What to scan</legend>
+        <label><input type="radio" name="mode" value="host" checked><span>One host</span></label>
+        <label><input type="radio" name="mode" value="estate"><span>Target list</span></label>
+      </fieldset>
       <div class="target-row">
-        <label for="host" class="sr-only">Host, IP address, or host:port</label>
-        <input id="host" name="host" type="text" inputmode="url" spellcheck="false" autocapitalize="off"
-               placeholder="hostname, IP, or host:port" aria-describedby="host-hint">
+        <div id="host-row" class="target-field">
+          <label for="host" class="sr-only">Host, IP address, or host:port</label>
+          <input id="host" name="host" type="text" inputmode="url" spellcheck="false" autocapitalize="off"
+                 placeholder="hostname, IP, or host:port" aria-describedby="host-hint">
+        </div>
+        <div id="targets-row" class="target-field" hidden>
+          <label for="targets" class="sr-only">Targets, one per line</label>
+          <textarea id="targets" name="targets" rows="6" spellcheck="false" autocapitalize="off" aria-describedby="targets-hint"
+                    placeholder="mail.corp.local&#10;10.0.0.0/28&#10;vpn.corp.local:8443&#10;# comments are ignored"></textarea>
+        </div>
         <button id="go" type="submit" class="primary">Scan</button>
         <button id="stop" type="button" class="secondary" hidden>Stop</button>
       </div>
       <p id="host-hint" class="hint">e.g. <code>mail.corp.local</code>, <code>10.0.0.5:2222</code>, <code>[fd00::5]:8443</code></p>
+      <p id="targets-hint" class="hint" hidden>One target per line: a hostname, an IP, <code>host:port</code>, a URL, or a CIDR such as <code>10.0.0.0/28</code>. <span id="targets-note"></span></p>
 
       <div id="scope-row" class="field">
         <span id="scope-label" class="field-label">Scope</span>
@@ -63,7 +76,7 @@
           <p><strong>Harvest now, decrypt later.</strong> Anyone who records encrypted traffic today can keep it until a large quantum computer can break the classical key exchange that protected it (X25519, ECDH, RSA). Traffic recorded today can't be protected after the fact, which is why the key exchange is what matters now.</p>
           <p><strong>Post-quantum key exchange.</strong> <code>X25519MLKEM768</code> combines classical X25519 with ML-KEM-768 (NIST FIPS 203). The connection stays secure as long as either one holds, so it is safe to deploy today.</p>
           <p><strong>Why not certificates?</strong> A certificate signature only has to resist an attacker during the handshake, so recorded traffic doesn't make it vulnerable later. Moving certificates to ML-DSA is a planning item, not an emergency.</p>
-          <p><strong>What pqscan doesn't check.</strong> Certificate trust and validity, application-layer encryption, and anything behind the endpoint it reached.</p>
+          <p><strong>What pqscan doesn't check.</strong> Certificate trust and validity, and anything behind the endpoint it reached. When TLS ends at a CDN or proxy, pqscan names it; the hops behind it are separate connections that need their own scan.</p>
         </div>
       </details>
 
@@ -111,15 +124,21 @@
         <div><dt><span class="conf conf-high">One check</span></dt><dd>The decisive check succeeded but the confirming one couldn't run (for example, a timeout).</dd></div>
         <div><dt><span class="conf conf-partial">Some clients</span></dt><dd>Post-quantum only with clients that offer the P-256/P-384 hybrids. Browsers get classical key exchange.</dd></div>
         <div><dt><span class="conf conf-inconsistent">Unverified</span></dt><dd>The checks disagreed, usually because several differently configured servers share one address. Re-scan before relying on it.</dd></div>
+        <div><dt><span class="conf conf-mixed">Mixed</span></dt><dd>Observed directly: some addresses behind the name, or some of the repeated identical offers to one address, got post-quantum key exchange and others didn't. The service counts as not post-quantum until every server is.</dd></div>
         <div><dt><span class="conf conf-low">Low</span></dt><dd>An engine control failed, or the network path strips ML-KEM, so the result may be wrong.</dd></div>
       </dl>
-      <p class="prose small">Every result is valid for the IP address and port shown, as reached from this scanner at scan time. Other servers behind the same name, or a TLS-inspecting proxy, can behave differently.</p>
+      <h3>Many servers behind one name</h3>
+      <div class="prose">
+        <p>A name can resolve to several addresses, and one address can front a pool of servers. pqscan probes every address a name resolves to (by default up to 8, set with <code>--max-addresses</code>) and repeats the decisive ML-KEM offer 3 times per address (<code>--samples</code>). Addresses that agree are reported as one result; addresses that disagree are listed one by one. If the repeated offers get different answers, the pool is mixed.</p>
+        <p>On HTTPS, pqscan also sends one <code>HEAD</code> request over the finished handshake and reads the response headers for a CDN or proxy (for example <code>Cf-Ray</code>, <code>Via</code>, <code>X-Amz-Cf-Id</code>). If it finds one, the result is valid up to that edge only.</p>
+      </div>
+      <p class="prose small">Every result is valid for the addresses and port shown, as reached from this scanner at scan time. A TLS-inspecting proxy on the scanner's own network path can change results; the network path check detects that.</p>
     </section>
   </main>
 
   <footer class="wrap footer">
     <span>pqscan checks key exchange per <a href="https://datatracker.ietf.org/doc/html/rfc8446">RFC 8446</a>, <a href="https://datatracker.ietf.org/doc/draft-ietf-tls-ecdhe-mlkem/">draft-ietf-tls-ecdhe-mlkem</a>, and <a href="https://doi.org/10.6028/NIST.FIPS.203">FIPS 203</a>. Everything on this page is served by the scanner itself.</span>
   </footer>
-  <script src="app.js"></script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>

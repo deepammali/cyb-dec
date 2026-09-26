@@ -111,7 +111,7 @@ func TestScanStreamEmitsEachService(t *testing.T) {
 		auto,
 	}
 	var emitted []report.ServiceReport
-	hr := ScanStream(context.Background(), "127.0.0.1", svcs, 3*time.Second, report.Env{}, func(sr report.ServiceReport) {
+	hr := ScanStream(context.Background(), "127.0.0.1", svcs, Options{Timeout: 3 * time.Second}, report.Env{}, func(sr report.ServiceReport) {
 		emitted = append(emitted, sr)
 	})
 	if len(emitted) != 3 || len(hr.Services) != 3 || hr.Partial {
@@ -148,7 +148,7 @@ func TestScanStreamStopsOnCancel(t *testing.T) {
 	time.AfterFunc(300*time.Millisecond, cancel)
 	start := time.Now()
 	emits := 0
-	hr := ScanStream(ctx, "127.0.0.1", svcs, 4*time.Second, report.Env{}, func(report.ServiceReport) { emits++ })
+	hr := ScanStream(ctx, "127.0.0.1", svcs, Options{Timeout: 4 * time.Second}, report.Env{}, func(report.ServiceReport) { emits++ })
 	if d := time.Since(start); d > 2*time.Second {
 		t.Fatalf("ScanStream returned after %v; want prompt return on cancel", d)
 	}

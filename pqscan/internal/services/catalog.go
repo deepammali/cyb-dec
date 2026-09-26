@@ -3,19 +3,10 @@
 package services
 
 import (
-	"context"
 	"fmt"
-	"net"
-	"net/netip"
-	"sort"
-	"strconv"
 	"strings"
-	"sync"
-	"time"
 
 	"pqscan/internal/probe"
-	"pqscan/internal/report"
-	"pqscan/internal/safety"
 )
 
 // Family selects which prober handles a service.
@@ -35,6 +26,7 @@ type Service struct {
 	Family   Family         `json:"-"`
 	Preamble probe.Preamble `json:"-"` // TLS family: nil = implicit TLS
 	Auto     bool           `json:"-"` // detect the protocol before probing (host:port scans)
+	HTTP     bool           `json:"-"` // speaks HTTPS: check whether a CDN/proxy terminates TLS
 }
 
 func implicit(name string, port int) Service {
@@ -48,7 +40,7 @@ func starttls(name string, port int, proto string, pre probe.Preamble) Service {
 // Catalog is the built-in service list, HTTPS first so the most common answer
 // arrives first.
 var Catalog = []Service{
-	implicit("HTTPS", 443),
+	{Name: "HTTPS", Port: 443, Group: "Implicit TLS", Protocol: "tls", HTTP: true},
 	implicit("SMTPS", 465),
 	implicit("IMAPS", 993),
 	implicit("POP3S", 995),
@@ -177,6 +169,7 @@ func ForPort(proto string, port int) (Service, error) {
 	case "tls":
 		s := implicit("TLS", port)
 		s.Group = "Custom"
+		s.HTTP = port == 443 || port == 8443
 		return s, nil
 	case "ssh":
 		return Service{Name: "SSH", Port: port, Group: "Custom", Protocol: "ssh", Family: FamilySSH}, nil
@@ -192,137 +185,4 @@ func ForPort(proto string, port int) (Service, error) {
 		return starttls("PostgreSQL", port, "postgres+sslrequest", probe.PostgresStartTLS), nil
 	}
 	return Service{}, fmt.Errorf("unknown protocol %q (auto, tls, ssh, smtp, imap, pop3, ftp, postgres)", proto)
-}
-
-// probeOne runs the right prober for s, detecting the protocol first if asked.
-func probeOne(host string, s Service, timeout time.Duration) probe.ServiceResult {
-	if s.Auto {
-		proto, greeting, err := probe.Detect(host, s.Port, timeout)
-		if err != nil {
-			return probe.ServiceResult{
-				Service: s.Name, Kind: "tls", Protocol: "auto", Host: host, Port: s.Port,
-				Banner: greeting, Error: err.Error(), ErrorKind: probe.ErrorKind(err),
-			}
-		}
-		detected, _ := ForPort(proto, s.Port)
-		res := probeOne(host, detected, timeout)
-		res.Detected = true
-		return res
-	}
-	var res probe.ServiceResult
-	if s.Family == FamilySSH {
-		res = probe.ProbeSSH(s.Name, host, s.Port, timeout)
-	} else {
-		res = probe.ProbeTLS(s.Name, host, s.Port, host, s.Preamble, timeout)
-	}
-	res.Protocol = s.Protocol
-	return res
-}
-
-// CheckPath probes a reference server known to support ML-KEM, to learn whether
-// this scanner's network path carries ML-KEM handshakes. If it doesn't, every
-// classical result from this scanner may be a false negative.
-func CheckPath(reference string, timeout time.Duration) *report.PathCheck {
-	pc := &report.PathCheck{Reference: reference}
-	host, port, err := safety.ParseTarget(reference)
-	if err != nil {
-		pc.Error = err.Error()
-		return pc
-	}
-	if port == 0 {
-		port = 443
-	}
-	pc.Reference = net.JoinHostPort(host, strconv.Itoa(port))
-	r := probe.ProbeTLS("reference", host, port, host, nil, timeout)
-	if r.Error != "" {
-		pc.Error = r.Error
-		return pc
-	}
-	if h, _, err := net.SplitHostPort(r.Address); err == nil {
-		if ip, err := netip.ParseAddr(h); err == nil && ip.IsLoopback() {
-			pc.Loopback = true
-		}
-	}
-	offered := len(r.Groups) > 0 && r.Groups[0].Supported
-	forced := r.Forced != nil && r.Forced.Completed
-	pc.Carried = offered || forced
-	outcome := "did not complete"
-	if forced {
-		outcome = "completed"
-	}
-	pc.Detail = fmt.Sprintf("server chose %s; ML-KEM-only handshake %s", orDash(r.NegotiatedGroup), outcome)
-	return pc
-}
-
-func orDash(s string) string {
-	if s == "" {
-		return "—"
-	}
-	return s
-}
-
-// Scan probes every service and returns the host report.
-func Scan(host string, svcs []Service, timeout time.Duration, env report.Env) report.HostReport {
-	return ScanStream(context.Background(), host, svcs, timeout, env, nil)
-}
-
-// ScanStream probes services concurrently, calling emit (serialized) as each one
-// finishes. Once ctx is cancelled it launches no more probes, emits nothing
-// further, and returns a partial report of what had finished.
-func ScanStream(ctx context.Context, host string, svcs []Service, timeout time.Duration, env report.Env, emit func(report.ServiceReport)) report.HostReport {
-	type indexed struct {
-		i  int
-		sr report.ServiceReport
-	}
-	var (
-		mu   sync.Mutex
-		done []indexed
-		wg   sync.WaitGroup
-	)
-	sem := make(chan struct{}, 8)
-
-launch:
-	for i, s := range svcs {
-		select {
-		case <-ctx.Done():
-			break launch
-		case sem <- struct{}{}:
-		}
-		if ctx.Err() != nil {
-			<-sem
-			break
-		}
-		wg.Add(1)
-		go func(i int, s Service) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			sr := report.ForService(probeOne(host, s, timeout), env)
-			mu.Lock()
-			defer mu.Unlock()
-			if ctx.Err() != nil {
-				return
-			}
-			done = append(done, indexed{i, sr})
-			if emit != nil {
-				emit(sr)
-			}
-		}(i, s)
-	}
-
-	finished := make(chan struct{})
-	go func() { wg.Wait(); close(finished) }()
-	select {
-	case <-finished:
-	case <-ctx.Done():
-	}
-
-	mu.Lock()
-	snapshot := append([]indexed(nil), done...)
-	mu.Unlock()
-	sort.Slice(snapshot, func(a, b int) bool { return snapshot[a].i < snapshot[b].i })
-	results := make([]report.ServiceReport, len(snapshot))
-	for k, d := range snapshot {
-		results[k] = d.sr
-	}
-	return report.Rollup(host, results, len(svcs), len(results) < len(svcs), env)
 }

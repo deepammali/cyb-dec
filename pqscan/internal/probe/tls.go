@@ -53,8 +53,10 @@ type ServiceResult struct {
 	CertSigAlg      string        `json:"certSignatureAlgorithm,omitempty"`
 	CertNotAfter    string        `json:"certNotAfter,omitempty"`
 	CertSubject     string        `json:"certSubject,omitempty"`
-	Address         string        `json:"address,omitempty"`     // the IP:port actually tested
-	Forced          *ForcedCheck  `json:"forcedCheck,omitempty"` // independent second check (TLS)
+	Address         string        `json:"address,omitempty"`      // the IP:port actually tested
+	Forced          *ForcedCheck  `json:"forcedCheck,omitempty"`  // independent second check (TLS)
+	OfferSamples    []string      `json:"offerSamples,omitempty"` // server's choice on each repeated offer
+	Edge            *Edge         `json:"edge,omitempty"`         // CDN/proxy terminating TLS, if detected
 	Error           string        `json:"error,omitempty"`
 	ErrorKind       string        `json:"errorKind,omitempty"`
 }
@@ -75,11 +77,28 @@ func (r ServiceResult) fail(err error) ServiceResult {
 	return r
 }
 
-// ProbeTLS scans one TLS service at host:port. serverName is the SNI to present
-// (usually host). pre is the STARTTLS preamble (nil for implicit TLS). It builds
-// the ML-KEM support matrix via hand-crafted ClientHellos and gathers TLS/cert
-// context via a standard handshake.
+// TLSOptions tune a TLS probe beyond the essentials.
+type TLSOptions struct {
+	// Samples is how many times the decisive offer (X25519MLKEM768 + X25519) is
+	// made. More than one reveals a pool of differently configured servers
+	// behind one address.
+	Samples int
+	// HTTP sends one HEAD request after the handshake to learn whether TLS
+	// terminates at a CDN or proxy rather than at the origin.
+	HTTP bool
+}
+
+// ProbeTLS scans one TLS service at host:port with default options.
 func ProbeTLS(service, host string, port int, serverName string, pre Preamble, timeout time.Duration) ServiceResult {
+	return ProbeTLSWith(service, host, port, serverName, pre, timeout, TLSOptions{})
+}
+
+// ProbeTLSWith scans one TLS service at host:port. host is what gets dialed (a
+// name or one of its addresses); serverName is the SNI to present. pre is the
+// STARTTLS preamble (nil for implicit TLS). It builds the ML-KEM support matrix
+// via hand-crafted ClientHellos and gathers TLS/cert context via a standard
+// handshake.
+func ProbeTLSWith(service, host string, port int, serverName string, pre Preamble, timeout time.Duration, opts TLSOptions) ServiceResult {
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
@@ -113,6 +132,9 @@ func ProbeTLS(service, host string, port int, serverName string, pre Preamble, t
 			res.CertSigAlg = c.SignatureAlgorithm.String()
 			res.CertNotAfter = c.NotAfter.UTC().Format("2006-01-02")
 			res.CertSubject = c.Subject.CommonName
+		}
+		if opts.HTTP {
+			res.Edge = detectEdge(tconn, serverName, timeout)
 		}
 	}
 	tconn.Close()
@@ -156,8 +178,29 @@ func ProbeTLS(service, host string, port int, serverName string, pre Preamble, t
 		}
 	}
 	res.Reachable = reachable
+	if len(res.Groups) > 0 && res.Groups[0].Note == "" {
+		res.OfferSamples = []string{sampleName(res.Groups[0])}
+		for i := 1; i < opts.Samples; i++ {
+			c, err := probeGroup(addr, serverName, GroupX25519MLKEM768, pre, timeout)
+			switch {
+			case err != nil:
+				res.OfferSamples = append(res.OfferSamples, "error")
+			case c.Alert:
+				res.OfferSamples = append(res.OfferSamples, "refused")
+			default:
+				res.OfferSamples = append(res.OfferSamples, chosenName(c.Selected))
+			}
+		}
+	}
 	res.Forced = forcedMLKEM(addr, serverName, pre, timeout)
 	return res
+}
+
+func sampleName(g GroupResult) string {
+	if g.Alerted {
+		return "refused"
+	}
+	return g.ServerChose
 }
 
 // forcedMLKEM runs the independent check: a complete Go crypto/tls handshake

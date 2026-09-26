@@ -46,10 +46,21 @@ const (
 // assessment of how far the result can be trusted.
 type ServiceReport struct {
 	probe.ServiceResult
-	State      State      `json:"state"`
-	Verdict    Verdict    `json:"verdict"`
-	Headline   string     `json:"headline"`
-	Assessment Assessment `json:"assessment"`
+	State      State            `json:"state"`
+	Verdict    Verdict          `json:"verdict"`
+	Headline   string           `json:"headline"`
+	Assessment Assessment       `json:"assessment"`
+	Addresses  []string         `json:"addresses,omitempty"`  // every address tested for this service
+	PerAddress []AddressOutcome `json:"perAddress,omitempty"` // set when addresses disagree
+}
+
+// AddressOutcome is one address's result when the addresses behind a name
+// disagree.
+type AddressOutcome struct {
+	Address         string `json:"address"`
+	State           State  `json:"state"`
+	NegotiatedGroup string `json:"negotiatedGroup,omitempty"`
+	Headline        string `json:"headline"`
 }
 
 // Counts tallies services by state.
@@ -64,6 +75,7 @@ type Counts struct {
 // HostReport is the host-level rollup across all scanned services.
 type HostReport struct {
 	Host            string           `json:"host"`
+	Target          string           `json:"target,omitempty"` // the estate entry: host, or host:port when one port was named
 	Services        []ServiceReport  `json:"services"`
 	Verdict         Verdict          `json:"verdict"`
 	Headline        string           `json:"headline"`
@@ -100,7 +112,25 @@ func supportedNotPreferred(r probe.ServiceResult) bool {
 
 func isPlaintext(r probe.ServiceResult) bool { return r.ErrorKind == "no_starttls" }
 
+// poolMixed reports whether identical offers to one address got both ML-KEM and
+// classical answers: direct evidence of differently configured servers behind it.
+func poolMixed(r probe.ServiceResult) bool {
+	var pq, classical bool
+	for _, s := range r.OfferSamples {
+		switch {
+		case strings.Contains(s, "MLKEM"):
+			pq = true
+		case s != "" && s != "error":
+			classical = true
+		}
+	}
+	return pq && classical
+}
+
 func stateOf(r probe.ServiceResult) State {
+	if r.Error == "" && poolMixed(r) {
+		return StateClassical // some connections get classical key exchange
+	}
 	if r.Error != "" {
 		switch {
 		case r.ErrorKind == "refused":
@@ -135,6 +165,14 @@ func headline(sr ServiceReport) string {
 		return fmt.Sprintf("Negotiates %s, a post-quantum hybrid key exchange.", r.NegotiatedGroup)
 	case StateClassical:
 		switch {
+		case poolMixed(r):
+			n := 0
+			for _, s := range r.OfferSamples {
+				if s != "" && s != "error" && !strings.Contains(s, "MLKEM") {
+					n++
+				}
+			}
+			return fmt.Sprintf("Mixed pool: %d of %d identical offers got classical key exchange, so some servers behind this address aren't post-quantum.", n, len(r.OfferSamples))
 		case supportedNotPreferred(r):
 			return fmt.Sprintf("Supports X25519MLKEM768 but prefers %s, so clients offering both get classical key exchange.", orDash(r.NegotiatedGroup))
 		case r.Kind == "ssh":

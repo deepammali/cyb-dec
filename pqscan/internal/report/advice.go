@@ -94,11 +94,17 @@ func Recommend(svcs []ServiceReport) []Recommendation {
 	var (
 		plaintext, tls12, mlkem, legacy        []ServiceReport
 		prefer, addX25519, inconsistent        []ServiceReport
+		mixed, edges                           []ServiceReport
 		sshOld, sshRestore, sshOther, sshNoMLK []ServiceReport
 		cnsaKEM, cnsaAES, certs                []ServiceReport
 	)
 	for _, s := range svcs {
+		if s.Edge != nil {
+			edges = append(edges, s)
+		}
 		switch {
+		case s.Assessment.Confidence == ConfMixed:
+			mixed = append(mixed, s)
 		case isPlaintext(s.ServiceResult):
 			plaintext = append(plaintext, s)
 		case s.Kind == "ssh" && s.State == StateClassical:
@@ -194,6 +200,28 @@ func Recommend(svcs []ServiceReport) []Recommendation {
 		},
 		Snippets: mlkemSnippets(mlkem, true),
 		Refs:     []Ref{refTLSMLKEM, refFIPS203},
+	})
+	add(mixed, Recommendation{
+		ID: "mixed-fleet", Priority: PriorityNow,
+		Title: "Bring every server behind these names to ML-KEM",
+		Why:   "Some servers answering for these services negotiate ML-KEM and others don't, either across the addresses a name resolves to or inside one address's pool. Clients that land on a classical server get classical key exchange.",
+		Steps: []string{
+			"Use the per-address results (or the pool sampling check) to find the classical servers.",
+			"Apply the same TLS library version and group configuration to every member of the pool or DNS rotation; configuration drift is the usual cause.",
+			"Re-scan: every address and every sample should read post-quantum.",
+		},
+		Snippets: mlkemSnippets(mixed, true),
+		Refs:     []Ref{refTLSMLKEM},
+	})
+	add(edges, Recommendation{
+		ID: "behind-edge", Priority: PriorityNow,
+		Title: "Measure the hops behind the CDN or proxy",
+		Why:   "TLS for these services terminates at an intermediary, so this scan measured only the client-to-edge connection. The edge-to-origin and internal connections carry the same data with their own key exchange, and nothing here shows whether those are post-quantum.",
+		Steps: []string{
+			"Scan the origin and backend servers directly from a machine that can reach them (pqscan --targets with their internal addresses).",
+			"Check the edge's origin-connection settings: whether it offers ML-KEM to your origin, and whether the origin accepts it.",
+			"Capture traffic on internal segments to see what those hops actually negotiate.",
+		},
 	})
 	add(prefer, Recommendation{
 		ID: "prefer-mlkem", Priority: PriorityNow,

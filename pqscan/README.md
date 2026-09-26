@@ -18,6 +18,7 @@ except the scanner itself.
 go run ./cmd/pqscan mail.corp.local                  # every service in the catalog
 go run ./cmd/pqscan --services mail,web example.com  # role presets or service names
 go run ./cmd/pqscan 10.0.0.5:2222                    # one port, protocol auto-detected
+go run ./cmd/pqscan --targets estate.txt             # an estate: hosts, host:port, URLs, CIDRs
 go run ./cmd/pqscan --json host                      # machine-readable report
 go run ./cmd/pqscan --selftest                       # run the engine controls and exit
 
@@ -35,6 +36,10 @@ Useful flags (CLI and web):
 | `--reference host[:port]` | A server known to support ML-KEM, used to check that this machine's network path carries ML-KEM handshakes (see [Reading results](#reading-results)). Off by default, so the scanner contacts nothing on its own. |
 | `--protocol auto` (CLI) | For `host:port` targets: `auto`, `tls`, `ssh`, `smtp`, `imap`, `pop3`, `ftp`, `postgres`. |
 | `--public-only` (web) | Refuse private, loopback, and link-local targets. Use it only when the web server is exposed to the internet. By default, internal addresses and names are scanned like any other. |
+| `--targets file` (CLI) | Scan an estate: one host, `host:port`, URL, or CIDR per line (`#` comments; `-` reads stdin). Entries without a port get the `--services` scope. |
+| `--max-hosts 256` | Cap on hosts a target list may expand to, CIDRs included. A larger list is refused before anything is probed. |
+| `--max-addresses 8` | Probe up to this many of the addresses a name resolves to. |
+| `--samples 3` | Repeat the decisive ML-KEM offer this many times per TLS service to reveal mixed load-balanced pools. |
 
 ## What it checks
 
@@ -106,6 +111,8 @@ Confidence levels:
   `X25519MLKEM768` still get classical key exchange.
 - **Unverified**: the checks disagreed, usually because several differently
   configured servers share one address.
+- **Mixed**: observed directly; some servers behind the name or address negotiate
+  ML-KEM and others don't. The service counts as not post-quantum.
 - **Low**: an engine control failed, or the network path strips ML-KEM.
 
 When the offer test reads classical but the forced test completes, the server
@@ -118,7 +125,18 @@ target can make every server look classical. Start with
 your targets; a reference on the same machine only covers local targets. If the
 reference reads classical, classical results are flagged as possible false negatives.
 
-Every result is valid for the IP:port shown, from this scanner, at scan time.
+**Many servers behind one name.** pqscan probes every address a name resolves to
+(up to `--max-addresses`), presenting the name for SNI. Addresses that agree become
+one result; addresses that disagree are listed one by one, and a name where some
+addresses are post-quantum and others aren't reads **Mixed fleet**. Behind a single
+address, the decisive offer is repeated `--samples` times; different answers to
+identical offers read **Mixed pool**. On HTTPS (443, 8443), one `HEAD` request over
+the finished handshake reads the response headers for a CDN or proxy (`Cf-Ray`,
+`X-Amz-Cf-Id`, `Via`, and others). When one is found, the result is valid up to that
+edge only, and the hops behind it need their own scan.
+
+Every result is valid for the addresses and port shown, from this scanner, at scan
+time.
 
 ## Recommendations
 
@@ -133,7 +151,9 @@ versions and copyable configuration:
     `ssl_curve_list`, PostgreSQL 18 `ssl_groups`);
   - replace the Kyber draft group;
   - upgrade OpenSSH or restore its post-quantum `KexAlgorithms`;
-  - check every server behind an address whose checks disagreed.
+  - check every server behind an address whose checks disagreed;
+  - bring every server in a mixed fleet or pool to ML-KEM;
+  - measure the hops behind a CDN or proxy.
 - **Harden** (standards and compliance): add `mlkem768x25519-sha256` to SSH; add
   ML-KEM-1024 and prefer AES-256 where CNSA 2.0 applies.
 - **Plan**: prepare certificates for ML-DSA (FIPS 204). This covers automating
@@ -143,6 +163,9 @@ versions and copyable configuration:
 ## Web UI and API
 
 The web UI does the following:
+- Scans one host, or a target list (hosts, `host:port`, URLs, CIDRs) with an estate
+  summary: a hosts table that expands into each host's services, and recommendations
+  aggregated across hosts.
 - Streams results as each probe finishes, with a Stop button.
 - Groups services by result, collapsing closed and silent ports.
 - Shows each service's evidence and assessment.
@@ -155,6 +178,12 @@ API endpoints:
   per probe, then `done`). Closing the connection stops the scan.
 - `POST /api/rollup`: the summary and recommendations for a stopped scan's partial
   results.
+- `POST /api/estate/stream {targets, services?, protocol?}`: an estate scan as NDJSON
+  (`start` with the expanded targets, then `host-start`, `service`, and `host-done`
+  events keyed by target `index`, then `done` with the estate report). `targets` is
+  the target-list text; lists over `--max-hosts` are refused with 400.
+- `POST /api/estate/rollup {targets, hosts}`: the estate summary for a stopped estate
+  scan.
 
 ### Future work (not yet implemented)
 
@@ -248,9 +277,10 @@ the internet, so it can't be used to probe your internal network.
 send to any client, and it exploits nothing. Scan only systems you are authorized
 to test.
 
-**14. What does a result *not* tell me?** It reflects this endpoint, from this
-scanner, at this moment. Several servers behind one name can differ; pqscan flags
-disagreement it sees as *Unverified*.
+**14. What does a result *not* tell me?** It reflects the addresses probed, from this
+scanner, at this moment. pqscan probes every address behind a name and samples each
+pool, but a large pool can hide a server no sample reached. When TLS ends at a CDN or
+proxy, the hops behind it are not measured.
 
 **15. Hybrid vs pure PQC?** All current TLS PQC groups are *hybrid*: a classical group
 (X25519/P-256) combined with ML-KEM. The connection stays secure if either component

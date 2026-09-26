@@ -46,6 +46,7 @@ const (
 	ConfHigh         = "high"         // one decisive check; the confirming check couldn't run
 	ConfPartial      = "partial"      // post-quantum only for some clients
 	ConfInconsistent = "inconsistent" // checks disagree
+	ConfMixed        = "mixed"        // directly observed: some servers behind the target are classical
 	ConfLow          = "low"          // engine or path problem undermines the result
 	ConfNone         = "none"         // not a readiness result (closed, no response, error)
 )
@@ -104,7 +105,13 @@ func forcedOutcome(r probe.ServiceResult) string {
 
 func assess(sr ServiceReport, env Env) Assessment {
 	r := sr.ServiceResult
-	limits := fmt.Sprintf("Valid for %s as reached from this scanner at scan time. Other servers behind the same name (DNS round-robin, load balancers) or a TLS-inspecting proxy on the path can behave differently.", orAddr(r))
+	limits := fmt.Sprintf("Valid for %s as reached from this scanner at scan time.", orAddr(r))
+	switch {
+	case len(r.OfferSamples) > 1 && !poolMixed(r):
+		limits += fmt.Sprintf(" %d identical offers got the same answer, but a large load-balanced pool can hide a differently configured server that none of them reached.", len(r.OfferSamples))
+	case r.Kind == "ssh":
+		limits += " A load-balanced pool behind this address can hide a differently configured server."
+	}
 
 	switch sr.State {
 	case StateClosed:
@@ -163,6 +170,14 @@ func assess(sr ServiceReport, env Env) Assessment {
 			{Name: "Offer test", Outcome: offer, Detail: offerDetail},
 			{Name: "Forced test", Outcome: forced, Detail: forcedDetail},
 		}
+		if len(r.OfferSamples) > 1 {
+			outcome := "pass"
+			if poolMixed(r) {
+				outcome = "fail"
+			}
+			a.Checks = append(a.Checks, Check{Name: "Pool sampling", Outcome: outcome,
+				Detail: fmt.Sprintf("%d identical offers to %s → server chose %s.", len(r.OfferSamples), orAddr(r), strings.Join(r.OfferSamples, ", "))})
+		}
 
 		switch sr.State {
 		case StatePQ:
@@ -183,11 +198,14 @@ func assess(sr ServiceReport, env Env) Assessment {
 			}
 		case StateClassical:
 			a.Question = qFN
-			switch forced {
-			case "pq":
+			switch {
+			case poolMixed(r):
+				a.Confidence, a.Summary = ConfMixed, "Mixed pool: observed directly across repeated connections."
+				a.Answer = "No. Identical offers to the same address got different answers, so several servers with different settings share it. Connections that land on the classical ones get classical key exchange."
+			case forced == "pq":
 				a.Confidence, a.Summary = ConfConfirmed, "Confirmed: ML-KEM is supported but not preferred."
 				a.Answer = fmt.Sprintf("No, for real clients. The server does support X25519MLKEM768 (the forced handshake completed), but it chose %s when offered both, as every current browser does. Real traffic gets classical key exchange.", orDash(g0.ServerChose))
-			case "classical":
+			case forced == "classical":
 				a.Confidence, a.Summary = ConfConfirmed, "Confirmed by two independent checks."
 				a.Answer = "Ruled out for this network path. ML-KEM was offered first with a valid key and the server didn't take it; a second, independent TLS client offering only X25519MLKEM768 was refused too."
 			default:
@@ -228,6 +246,9 @@ func assess(sr ServiceReport, env Env) Assessment {
 				a.Answer = "Possible. A server known to support ML-KEM also read as classical from here, so something on the path (a proxy or middlebox) may be removing ML-KEM offers. Clients on the same path would also get classical key exchange, but the server itself may be ready."
 			}
 		}
+	}
+	if r.Edge != nil {
+		limits += fmt.Sprintf(" TLS terminates at %s (%s): the origin server and the hops behind it are separate connections that weren't measured.", r.Edge.Name, r.Edge.Evidence)
 	}
 	a.Limits = limits
 	return a

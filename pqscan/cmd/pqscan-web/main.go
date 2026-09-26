@@ -25,6 +25,8 @@ import (
 type config struct {
 	publicOnly bool          // refuse private/internal targets (for internet-facing deployments)
 	timeout    time.Duration // per-probe timeout
+	opts       services.Options
+	maxHosts   int // cap on an estate target list
 	limiter    *safety.RateLimiter
 	controls   []probe.Control // engine calibration, run once at startup
 	reference  string          // known ML-KEM server for the network-path check; empty = off
@@ -67,6 +69,9 @@ func main() {
 	publicOnly := flag.Bool("public-only", false, "refuse private, loopback, and link-local targets (use when exposing this server to the internet)")
 	timeout := flag.Duration("timeout", probe.DefaultTimeout, "per-probe timeout")
 	reference := flag.String("reference", "", "host[:port] of a server known to support ML-KEM, used to verify this scanner's network path (off by default: no outside contact)")
+	maxHosts := flag.Int("max-hosts", 256, "cap on hosts an estate target list (CIDRs included) may expand to")
+	samples := flag.Int("samples", services.DefaultSamples, "repeat the decisive ML-KEM offer this many times per TLS service (reveals mixed pools)")
+	maxAddrs := flag.Int("max-addresses", services.DefaultMaxAddresses, "probe up to this many addresses per name (reveals mixed fleets)")
 	flag.Parse()
 
 	controls := probe.RunControls()
@@ -87,7 +92,8 @@ func main() {
 		Addr: *addr,
 		Handler: newMux(config{
 			publicOnly: *publicOnly, timeout: *timeout, limiter: safety.NewRateLimiter(30, time.Minute),
-			controls: controls, reference: *reference, path: &pathCache{},
+			opts:     services.Options{Timeout: *timeout, Samples: *samples, MaxAddresses: *maxAddrs},
+			maxHosts: *maxHosts, controls: controls, reference: *reference, path: &pathCache{},
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
@@ -109,6 +115,7 @@ func newMux(cfg config) http.Handler {
 			"publicOnly": cfg.publicOnly,
 			"controls":   cfg.controls,
 			"reference":  cfg.reference,
+			"maxHosts":   cfg.maxHosts,
 		})
 	})
 
@@ -117,7 +124,70 @@ func newMux(cfg config) http.Handler {
 		if !ok {
 			return
 		}
-		writeJSON(w, http.StatusOK, services.ScanStream(r.Context(), host, svcs, cfg.timeout, cfg.env(), nil))
+		writeJSON(w, http.StatusOK, services.ScanStream(r.Context(), host, svcs, cfg.opts, cfg.env(), nil))
+	})
+
+	// Estate stream: "start" (targets), then per host "host-start", "service"
+	// events, and "host-done", then "done" with the estate report.
+	mux.HandleFunc("POST /api/estate/stream", func(w http.ResponseWriter, r *http.Request) {
+		if !cfg.limiter.Allow(clientIP(r)) {
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate limit exceeded, try again shortly"})
+			return
+		}
+		var req struct {
+			Targets  string   `json:"targets"` // one host, host:port, URL, or CIDR per line
+			Services []string `json:"services,omitempty"`
+			Protocol string   `json:"protocol,omitempty"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+		targets, err := safety.ParseTargets(strings.NewReader(req.Targets), cfg.maxHosts)
+		if err == nil && cfg.publicOnly {
+			for _, t := range targets {
+				if err = safety.ValidatePublic(t.Host); err != nil {
+					break
+				}
+			}
+		}
+		var scope []services.Service
+		if err == nil {
+			scope, err = services.Select(req.Services)
+		}
+		if err == nil && req.Protocol != "" {
+			_, err = services.ForPort(req.Protocol, 1)
+		}
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		send, rc := ndjson(w)
+		rc.SetWriteDeadline(time.Now().Add(time.Hour))
+		env := cfg.env()
+		send(map[string]any{"type": "start", "targets": targets, "services": scope, "startedAt": time.Now().UTC(),
+			"controls": env.Controls, "path": env.Path})
+		er := services.ScanEstate(r.Context(), targets, scope, req.Protocol, cfg.opts, env, func(ev services.EstateEvent) { send(ev) })
+		if r.Context().Err() == nil {
+			send(map[string]any{"type": "done", "report": er})
+		}
+	})
+
+	// Estate rollup for a stopped estate scan: the hosts that finished.
+	mux.HandleFunc("POST /api/estate/rollup", func(w http.ResponseWriter, r *http.Request) {
+		if !cfg.limiter.Allow(clientIP(r)) {
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate limit exceeded, try again shortly"})
+			return
+		}
+		var req struct {
+			Targets int                 `json:"targets"`
+			Hosts   []report.HostReport `json:"hosts"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<20)).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+		writeJSON(w, http.StatusOK, report.Estate(req.Hosts, req.Targets, cfg.env()))
 	})
 
 	// NDJSON stream: one "start" event, one "service" event per finished probe,
@@ -127,20 +197,12 @@ func newMux(cfg config) http.Handler {
 		if !ok {
 			return
 		}
-		rc := http.NewResponseController(w)
+		send, rc := ndjson(w)
 		rc.SetWriteDeadline(time.Now().Add(5 * time.Minute))
-		w.Header().Set("Content-Type", "application/x-ndjson")
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("X-Accel-Buffering", "no")
-		enc := json.NewEncoder(w)
-		send := func(v any) {
-			enc.Encode(v)
-			rc.Flush()
-		}
 		env := cfg.env()
 		send(map[string]any{"type": "start", "host": host, "services": svcs, "startedAt": time.Now().UTC(),
 			"controls": env.Controls, "path": env.Path})
-		hr := services.ScanStream(r.Context(), host, svcs, cfg.timeout, env, func(sr report.ServiceReport) {
+		hr := services.ScanStream(r.Context(), host, svcs, cfg.opts, env, func(sr report.ServiceReport) {
 			send(map[string]any{"type": "service", "service": sr})
 		})
 		if r.Context().Err() == nil {
@@ -174,6 +236,19 @@ func newMux(cfg config) http.Handler {
 	})
 
 	return securityHeaders(mux)
+}
+
+// ndjson prepares a streaming NDJSON response; send writes one event and flushes.
+func ndjson(w http.ResponseWriter) (func(any), *http.ResponseController) {
+	rc := http.NewResponseController(w)
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Accel-Buffering", "no")
+	enc := json.NewEncoder(w)
+	return func(v any) {
+		enc.Encode(v)
+		rc.Flush()
+	}, rc
 }
 
 // admit rate-limits and validates a scan request, writing the error response

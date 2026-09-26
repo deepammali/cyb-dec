@@ -32,11 +32,16 @@ func main() {
 	timeout := flag.Duration("timeout", probe.DefaultTimeout, "per-probe timeout")
 	reference := flag.String("reference", "", "host[:port] of a server known to support ML-KEM, to verify this machine's network path (off by default: no outside contact)")
 	selftest := flag.Bool("selftest", false, "run the engine controls against local reference servers and exit")
+	targets := flag.String("targets", "", "file with one host, host:port, URL, or CIDR per line ('-' for stdin): scan an estate")
+	maxHosts := flag.Int("max-hosts", 256, "cap on hosts a target list (CIDRs included) may expand to")
+	samples := flag.Int("samples", services.DefaultSamples, "repeat the decisive ML-KEM offer this many times per TLS service (reveals mixed pools)")
+	maxAddrs := flag.Int("max-addresses", services.DefaultMaxAddresses, "probe up to this many addresses per name (reveals mixed fleets)")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: pqscan [flags] <host | host:port>\n\nChecks whether a host's services use post-quantum key exchange (ML-KEM).\n\nflags:\n")
+		fmt.Fprintf(os.Stderr, "usage: pqscan [flags] <host | host:port>\n       pqscan [flags] --targets <file>\n\nChecks whether services use post-quantum key exchange (ML-KEM).\n\nflags:\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+	opts := services.Options{Timeout: *timeout, Samples: *samples, MaxAddresses: *maxAddrs}
 
 	if *selftest {
 		controls := probe.RunControls()
@@ -53,6 +58,13 @@ func main() {
 		}
 		fmt.Println("all engine controls passed: no systematic false positives or false negatives on the reference servers")
 		os.Exit(0)
+	}
+	if *targets != "" {
+		if flag.NArg() != 0 {
+			flag.Usage()
+			os.Exit(2)
+		}
+		os.Exit(runEstate(*targets, *maxHosts, *svcList, *protocol, *reference, *jsonOut, opts))
 	}
 	if flag.NArg() != 1 {
 		flag.Usage()
@@ -93,7 +105,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "\r  probing %s … %d/%d  %.0fs ", host, finished.Add(1), len(svcs), time.Since(start).Seconds())
 		}
 	}
-	hr := services.ScanStream(ctx, host, svcs, *timeout, env, progress)
+	hr := services.ScanStream(ctx, host, svcs, opts, env, progress)
 	if !*jsonOut && isTerminal(os.Stderr) {
 		fmt.Fprint(os.Stderr, "\r\033[K")
 	}
@@ -106,14 +118,113 @@ func main() {
 		printHuman(hr, time.Since(start))
 	}
 
-	switch hr.Verdict {
+	os.Exit(exitCode(hr.Verdict))
+}
+
+func exitCode(v report.Verdict) int {
+	switch v {
 	case report.Ready:
-		os.Exit(0)
+		return 0
 	case report.NotReady:
-		os.Exit(1)
-	default:
-		os.Exit(3)
+		return 1
 	}
+	return 3
+}
+
+// runEstate scans every target in a list and prints (or emits) the estate report.
+func runEstate(path string, maxHosts int, svcList, protocol, reference string, jsonOut bool, opts services.Options) int {
+	in := os.Stdin
+	if path != "-" {
+		f, err := os.Open(path)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			return 2
+		}
+		defer f.Close()
+		in = f
+	}
+	targets, err := safety.ParseTargets(in, maxHosts)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 2
+	}
+	scope, err := services.Select([]string{svcList})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 2
+	}
+	env := report.Env{Controls: probe.RunControls()}
+	if reference != "" {
+		env.Path = services.CheckPath(reference, opts.Timeout)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	start := time.Now()
+	var done atomic.Int32
+	progress := func(services.EstateEvent) {}
+	if !jsonOut && isTerminal(os.Stderr) {
+		progress = func(ev services.EstateEvent) {
+			if ev.Type == "host-done" {
+				fmt.Fprintf(os.Stderr, "\r  %d/%d hosts scanned · %.0fs ", done.Add(1), len(targets), time.Since(start).Seconds())
+			}
+		}
+	}
+	er := services.ScanEstate(ctx, targets, scope, protocol, opts, env, progress)
+	if !jsonOut && isTerminal(os.Stderr) {
+		fmt.Fprint(os.Stderr, "\r\033[K")
+	}
+	if jsonOut {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(er)
+	} else {
+		printEstate(er, time.Since(start))
+	}
+	return exitCode(er.Verdict)
+}
+
+func printEstate(er report.EstateReport, elapsed time.Duration) {
+	fmt.Printf("\npqscan estate · %d %s · %s · %.1f s\n", er.Targets, plural(er.Targets, "target", "targets"), time.Now().UTC().Format("2006-01-02 15:04 UTC"), elapsed.Seconds())
+	fmt.Printf("%s — %s\n", strings.ToUpper(er.Verdict.Label()), er.Headline)
+	if er.Partial {
+		fmt.Printf("Stopped — %d of %d targets scanned.\n", len(er.Hosts), er.Targets)
+	}
+	fmt.Println(trustLine(report.HostReport{Controls: er.Controls, Path: er.Path}))
+	s := er.Summary
+	fmt.Printf("Hosts: %d post-quantum · %d not · %d undetermined   Services: %d post-quantum · %d classical · %d plaintext · %d closed · %d no response\n",
+		s.HostsReady, s.HostsNotReady, s.HostsUndetermined, s.Services.PQ, s.Services.Classical, s.Plaintext, s.Services.Closed, s.Services.NoResponse)
+
+	hosts := append([]report.HostReport(nil), er.Hosts...)
+	order := map[report.Verdict]int{report.NotReady: 0, report.Undetermined: 1, report.Ready: 2}
+	sort.SliceStable(hosts, func(i, j int) bool { return order[hosts[i].Verdict] < order[hosts[j].Verdict] })
+	fmt.Printf("\n  %-28s %-20s %s\n", "HOST", "RESULT", "SERVICES THAT NEED ACTION")
+	for _, h := range hosts {
+		var need []string
+		for _, sv := range h.Services {
+			if severity(sv) <= 2 {
+				need = append(need, fmt.Sprintf("%s %d (%s)", sv.Service, sv.Port, keyExchange(sv)))
+			}
+		}
+		detail := strings.Join(need, ", ")
+		if detail == "" {
+			detail = h.Headline
+		}
+		name := h.Target
+		if name == "" {
+			name = h.Host
+		}
+		fmt.Printf("  %-28s %-20s %s\n", name, h.Verdict.Label(), detail)
+	}
+	printRecommendations(er.Recommendations)
+	fmt.Println()
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 func isTerminal(f *os.File) bool {
@@ -138,6 +249,10 @@ func severity(s report.ServiceReport) int {
 
 func keyExchange(s report.ServiceReport) string {
 	switch {
+	case len(s.PerAddress) > 0:
+		return "differs by address"
+	case s.Assessment.Confidence == report.ConfMixed:
+		return "mixed pool"
 	case s.State == report.StatePQ && s.Kind == "ssh":
 		return s.BestPQGroup
 	case s.State == report.StatePQ:
@@ -257,37 +372,49 @@ func printHuman(hr report.HostReport, elapsed time.Duration) {
 			if s.Kind == "ssh" && len(s.Advertised) > 0 {
 				fmt.Printf("    advertises: %s\n", strings.Join(s.Advertised, ", "))
 			}
+			if s.Edge != nil {
+				fmt.Printf("    TLS terminates at: %s (%s)\n", s.Edge.Name, s.Edge.Evidence)
+			}
+			for _, pa := range s.PerAddress {
+				fmt.Printf("    %-22s %s\n", pa.Address, pa.Headline)
+			}
+			if len(s.PerAddress) == 0 && len(s.Addresses) > 1 {
+				fmt.Printf("    same on every address: %s\n", strings.Join(s.Addresses, ", "))
+			}
 		}
 	}
 
-	if len(hr.Recommendations) > 0 {
-		fmt.Println("\nImprove quantum resilience")
-		n := 0
-		last := report.Priority("")
-		for _, r := range hr.Recommendations {
-			if r.Priority != last {
-				fmt.Printf("  %s\n", strings.ToUpper(string(r.Priority)))
-				last = r.Priority
-			}
-			n++
-			fmt.Printf("  %2d. %s   [%s]\n", n, r.Title, strings.Join(r.Services, ", "))
-			fmt.Printf("      %s\n", wrap(r.Why, 74, "      "))
-			for _, st := range r.Steps {
-				fmt.Printf("      - %s\n", wrap(st, 72, "        "))
-			}
-			for _, sn := range r.Snippets {
-				fmt.Printf("      %s:\n", sn.Label)
-				for _, line := range strings.Split(sn.Code, "\n") {
-					fmt.Printf("          %s\n", line)
-				}
-			}
-		}
-	}
+	printRecommendations(hr.Recommendations)
 
 	fmt.Println("\npqscan checks key exchange, the part harvest-now-decrypt-later attacks: traffic")
 	fmt.Println("recorded today with classical key exchange can be decrypted once a large quantum")
 	fmt.Println("computer exists.")
 	fmt.Println()
+}
+
+func printRecommendations(recs []report.Recommendation) {
+	if len(recs) == 0 {
+		return
+	}
+	fmt.Println("\nImprove quantum resilience")
+	last := report.Priority("")
+	for n, r := range recs {
+		if r.Priority != last {
+			fmt.Printf("  %s\n", strings.ToUpper(string(r.Priority)))
+			last = r.Priority
+		}
+		fmt.Printf("  %2d. %s   [%s]\n", n+1, r.Title, strings.Join(r.Services, ", "))
+		fmt.Printf("      %s\n", wrap(r.Why, 74, "      "))
+		for _, st := range r.Steps {
+			fmt.Printf("      - %s\n", wrap(st, 72, "        "))
+		}
+		for _, sn := range r.Snippets {
+			fmt.Printf("      %s:\n", sn.Label)
+			for _, line := range strings.Split(sn.Code, "\n") {
+				fmt.Printf("          %s\n", line)
+			}
+		}
+	}
 }
 
 // trustLine states what backs every result: engine controls and the network path.
