@@ -1,6 +1,6 @@
 // Capture view: analyze packet captures for how each connection set up its keys.
 import {
-  h, $, plural, reducedMotion, VERDICT, PRIORITY, downloadJSON, announce, showFormError, stamp,
+  h, $, plural, reducedMotion, VERDICT, PRIORITY, downloadJSON, downloadCBOM, announce, showFormError, stamp,
   recsSection, openRec, onPrint,
 } from './core.js';
 import { CLASS, size } from './files.js';
@@ -135,6 +135,7 @@ function renderVerdict() {
       h('span', { class: 'meta' }, stamp(st.startedAt, st.elapsed)),
       h('span', { class: 'actions' },
         h('button', { type: 'button', class: 'link', onclick: () => downloadJSON(r, `pqscan-capture-${st.startedAt.toISOString().slice(0, 10)}.json`) }, 'Download JSON'),
+        h('button', { type: 'button', class: 'link', title: 'CycloneDX 1.6 cryptography bill of materials', onclick: (e) => downloadCBOM('capture', r, `pqscan-capture-${st.startedAt.toISOString().slice(0, 10)}-cbom.cdx.json`, e.currentTarget) }, 'Download CBOM'),
         h('button', { type: 'button', class: 'link', onclick: () => window.print() }, 'Print'))),
   ].filter(Boolean));
 }

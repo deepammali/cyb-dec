@@ -1,7 +1,7 @@
 // Files view: inspect data at rest. Files are uploaded to this pqscan server,
 // parsed in memory there, and never stored.
 import {
-  h, $, plural, reducedMotion, VERDICT, PRIORITY, downloadJSON, announce, showFormError, stamp,
+  h, $, plural, reducedMotion, VERDICT, PRIORITY, downloadJSON, downloadCBOM, announce, showFormError, stamp,
   recsSection, openRec, onPrint,
 } from './core.js';
 
@@ -166,6 +166,7 @@ function renderVerdict() {
       h('span', { class: 'meta' }, stamp(st.startedAt, st.elapsed)),
       h('span', { class: 'actions' },
         h('button', { type: 'button', class: 'link', onclick: () => downloadJSON(r, `pqscan-files-${st.startedAt.toISOString().slice(0, 10)}.json`) }, 'Download JSON'),
+        h('button', { type: 'button', class: 'link', title: 'CycloneDX 1.6 cryptography bill of materials', onclick: (e) => downloadCBOM('files', r, `pqscan-files-${st.startedAt.toISOString().slice(0, 10)}-cbom.cdx.json`, e.currentTarget) }, 'Download CBOM'),
         h('button', { type: 'button', class: 'link', onclick: () => window.print() }, 'Print'))));
 }
 

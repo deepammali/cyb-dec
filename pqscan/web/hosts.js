@@ -1,6 +1,6 @@
 // Hosts view: scan one host (probe) or a list of targets (estate).
 import {
-  h, $, plural, reducedMotion, VERDICT, CONF, PRIORITY, readNDJSON, postJSON, copyText, downloadJSON,
+  h, $, plural, reducedMotion, VERDICT, CONF, PRIORITY, readNDJSON, postJSON, copyText, downloadJSON, downloadCBOM,
   announce, showFormError, stamp, assessmentBlock, trustPanel, recsSection, openRec, onPrint,
 } from './core.js';
 
@@ -212,7 +212,7 @@ function detailPanel(scan, r, id) {
     ['Protocol', r.protocol ? `${r.protocol}${r.detected ? ' (auto-detected)' : ''}` : null],
     ['Server says', r.banner],
     ['TLS', r.tlsVersion ? `${r.tlsVersion} · ${r.cipherSuite}` : null],
-    ['Certificate', r.certSignatureAlgorithm ? `${r.certSubject ? `CN=${r.certSubject} · ` : ''}${r.certSignatureAlgorithm} · expires ${r.certNotAfter}` : null],
+    ['Certificate', r.certSignatureAlgorithm ? `${r.certSubject ? `CN=${r.certSubject} · ` : ''}${r.certSignatureAlgorithm} · expires ${(r.certNotAfter || "").slice(0, 10)}` : null],
     ['Terminates at', r.edge ? `${r.edge.name} (${r.edge.evidence}): the origin and the hops behind it weren't measured` : null],
     ['Error', r.error],
   ].filter(([, v]) => v);
@@ -386,6 +386,7 @@ function renderHostVerdict(scan) {
       h('span', { class: 'actions' },
         h('button', { type: 'button', class: 'link', onclick: (e) => copyText(location.href, e.currentTarget, 'Copy link') }, 'Copy link'),
         h('button', { type: 'button', class: 'link', onclick: () => downloadJSON(scan.report || { host: scan.host, partial: true, services: done }, `pqscan-${scan.host}-${scan.startedAt.toISOString().slice(0, 10)}.json`) }, 'Download JSON'),
+        scan.report ? h('button', { type: 'button', class: 'link', title: 'CycloneDX 1.6 cryptography bill of materials', onclick: (e) => downloadCBOM('host', scan.report, `pqscan-${scan.host}-cbom.cdx.json`, e.currentTarget) }, 'Download CBOM') : null,
         h('button', { type: 'button', class: 'link', onclick: () => window.print() }, 'Print'))) : null,
   ].filter(Boolean));
   if (live) tickProgress(scan, done.length, total);
@@ -559,6 +560,7 @@ function renderEstateVerdict(est) {
       h('span', { class: 'meta' }, stamp(est.startedAt, est.elapsed)),
       h('span', { class: 'actions' },
         h('button', { type: 'button', class: 'link', onclick: () => downloadJSON(est.report || { partial: true, hosts: est.entries.filter((e) => e.report).map((e) => e.report) }, `pqscan-estate-${est.startedAt.toISOString().slice(0, 10)}.json`) }, 'Download JSON'),
+        est.report ? h('button', { type: 'button', class: 'link', title: 'CycloneDX 1.6 cryptography bill of materials', onclick: (e) => downloadCBOM('estate', est.report, `pqscan-estate-${est.startedAt.toISOString().slice(0, 10)}-cbom.cdx.json`, e.currentTarget) }, 'Download CBOM') : null,
         h('button', { type: 'button', class: 'link', onclick: () => window.print() }, 'Print'))) : null,
   ].filter(Boolean));
   if (live) tickProgress(est, doneN, total);

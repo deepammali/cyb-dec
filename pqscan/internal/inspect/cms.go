@@ -188,8 +188,14 @@ func cmsRecipient(ri node) (string, alg, string) {
 	case ri.is(classContext, 3): // PasswordRecipientInfo
 		for _, x := range c {
 			if x.isSeq() {
-				oid, _ := x.algorithm()
+				oid, params := x.algorithm()
 				a := lookup(oid)
+				if a.name == "PWRI-KEK" && len(params) > 0 { // name the wrapping cipher it carries
+					if inner, _ := params[0].algorithm(); inner != "" {
+						a = lookup(inner)
+						return "password, PWRI-KEK with " + a.name, a, "symmetric"
+					}
+				}
 				return "password, " + a.name, a, "symmetric"
 			}
 		}

@@ -79,6 +79,9 @@ func (f *Finding) flag(flags ...string) {
 	}
 }
 
+// Has reports whether the finding carries a flag.
+func (f Finding) Has(flag string) bool { return f.has(flag) }
+
 func (f *Finding) has(flag string) bool {
 	for _, x := range f.Flags {
 		if x == flag {

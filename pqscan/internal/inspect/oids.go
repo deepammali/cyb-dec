@@ -92,6 +92,7 @@ var oids = map[string]alg{
 	"1.3.6.1.4.1.42.2.17.1.1":    {name: "JKS proprietary key protection", primitive: "pbe", legacy: true},
 	"1.3.6.1.4.1.42.2.19.1":      {name: "PBE-MD5-3DES (JCEKS)", primitive: "pbe", legacy: true},
 	"1.2.840.113549.1.9.16.13.3": {name: "KEMRecipientInfo", primitive: "kem"},
+	"1.2.840.113549.1.9.16.3.9":  {name: "PWRI-KEK", primitive: "cipher"}, // RFC 3211: the wrapping cipher is its parameter
 	"1.2.840.113549.1.9.16.3.28": {name: "HKDF-SHA256", primitive: "kdf"},
 	"1.2.840.113549.1.9.16.3.29": {name: "HKDF-SHA384", primitive: "kdf"},
 	"1.2.840.113549.1.9.16.3.30": {name: "HKDF-SHA512", primitive: "kdf"},

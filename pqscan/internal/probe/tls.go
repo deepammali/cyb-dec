@@ -130,7 +130,7 @@ func ProbeTLSWith(service, host string, port int, serverName string, pre Preambl
 		if len(st.PeerCertificates) > 0 {
 			c := st.PeerCertificates[0]
 			res.CertSigAlg = c.SignatureAlgorithm.String()
-			res.CertNotAfter = c.NotAfter.UTC().Format("2006-01-02")
+			res.CertNotAfter = c.NotAfter.UTC().Format(time.RFC3339)
 			res.CertSubject = c.Subject.CommonName
 		}
 		if opts.HTTP {

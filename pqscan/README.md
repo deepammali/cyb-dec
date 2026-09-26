@@ -43,6 +43,7 @@ Useful flags (CLI and web):
 | `--max-hosts 256` | Cap on hosts a target list may expand to, CIDRs included. A larger list is refused before anything is probed. |
 | `--max-addresses 8` | Probe up to this many of the addresses a name resolves to. |
 | `--samples 3` | Repeat the decisive ML-KEM offer this many times per TLS service to reveal mixed load-balanced pools. |
+| `--cbom file` | Also write a CycloneDX 1.6 CBOM (see [CBOM export](#cbom-export)); `-` writes it to stdout. Works with probe, `--targets`, `inspect`, and `observe`. |
 | `--max-upload 200` (web) | MB accepted per file-inspection upload. Uploads are held in memory and never written to disk. |
 
 ## What it checks
@@ -225,6 +226,34 @@ handshake can't be assessed, and one-sided captures show only the client's offer
 IP fragments are skipped; QUIC is read from its Initial packets only. This version
 decrypts TLS 1.3 AES-GCM sessions; TLS 1.2 key log lines and ChaCha20-Poly1305
 sessions are reported as not decrypted.
+
+## CBOM export
+
+Every mode can export its results as a **Cryptography Bill of Materials** in
+CycloneDX 1.6 JSON, the format inventories and PQC-migration tools ingest:
+
+```sh
+pqscan --cbom host.cdx.json mail.corp.local
+pqscan --targets estate.txt --cbom estate.cdx.json
+pqscan inspect --cbom files.cdx.json /srv/backups
+pqscan observe --keylog keys.log --cbom traffic.cdx.json capture.pcap
+```
+
+In the web UI, every report has a **Download CBOM** link; the server converts the
+report the page already has (`POST /api/cbom {kind, report}`), without rescanning.
+
+What goes into the CBOM:
+
+| CycloneDX asset | From |
+|---|---|
+| `algorithm` | Every algorithm pqscan saw, once, with `primitive`, parameter set, curve, mode, `cryptoFunctions`, classical security level, and **NIST quantum security level** (0 for anything Shor's algorithm breaks; 1, 3, and 5 for the ML-KEM, ML-DSA, and SLH-DSA parameter sets and for AES-128/192/256). Each occurrence names where it was seen. |
+| `protocol` | Each probed TLS or SSH service, each observed connection group (TLS, QUIC, SSH, IKEv2 with its `ke` transforms, WireGuard), with cipher suites and references to their algorithms |
+| `certificate` | Server and file certificates: subject, issuer, expiry, signature algorithm, public key |
+| `related-crypto-material` | Keys (public or private, with size and how they are protected), ciphertexts and tokens (with the content cipher and the algorithm that secures their key), signatures |
+
+pqscan's own conclusions ride along as `pqscan:*` properties (class, confidence,
+outcome, whether the client offered ML-KEM). The output was validated against the
+official CycloneDX 1.6 JSON schema for all four modes.
 
 ## Recommendations
 

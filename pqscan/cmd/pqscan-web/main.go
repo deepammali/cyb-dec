@@ -19,6 +19,7 @@ import (
 
 	webui "pqscan/web"
 
+	"pqscan/internal/cbom"
 	"pqscan/internal/inspect"
 	"pqscan/internal/observe"
 	"pqscan/internal/probe"
@@ -175,6 +176,49 @@ func newMux(cfg config) http.Handler {
 	})
 
 	mux.HandleFunc("POST /api/observe", observeHandler(cfg))
+
+	// CBOM: turn a report the page already has into CycloneDX 1.6, without rescanning.
+	mux.HandleFunc("POST /api/cbom", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Kind   string          `json:"kind"` // host, estate, files, capture
+			Report json.RawMessage `json:"report"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<20)).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+		b := cbom.NewBuilder()
+		var err error
+		switch req.Kind {
+		case "host":
+			var hr report.HostReport
+			if err = json.Unmarshal(req.Report, &hr); err == nil {
+				b.AddHost(hr)
+			}
+		case "estate":
+			var er report.EstateReport
+			if err = json.Unmarshal(req.Report, &er); err == nil {
+				b.AddEstate(er)
+			}
+		case "files":
+			var ir inspect.Report
+			if err = json.Unmarshal(req.Report, &ir); err == nil {
+				b.AddInspect(ir)
+			}
+		case "capture":
+			var or observe.Report
+			if err = json.Unmarshal(req.Report, &or); err == nil {
+				b.AddObserve(or)
+			}
+		default:
+			err = errors.New("kind must be host, estate, files, or capture")
+		}
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "cbom: " + err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, b.BOM())
+	})
 
 	mux.HandleFunc("POST /api/scan", func(w http.ResponseWriter, r *http.Request) {
 		host, svcs, ok := cfg.admit(w, r)

@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Keys and certificates: X.509, SPKI, PKCS#8 (plain and encrypted), PKCS#1,
@@ -63,7 +64,11 @@ func (d keyDesc) encryption() bool {
 func keyFinding(f Finding, d keyDesc, what string) Finding {
 	f.Protection = d.detail
 	f.fact("Key", d.detail)
-	f.algo(Algorithm{Name: d.a.name, Primitive: d.a.primitive, Role: "public key", PQ: d.a.pq, Bits: d.bits})
+	name := d.a.name
+	if strings.HasPrefix(d.detail, "EC ") {
+		name = d.detail // the curve matters for an EC key
+	}
+	f.algo(Algorithm{Name: name, Primitive: d.a.primitive, Role: "public key", PQ: d.a.pq, Bits: d.bits})
 	switch {
 	case d.a.pq:
 		f.Class = ClassPQ
@@ -125,7 +130,7 @@ func certFinding(path string, n node) (Finding, bool) {
 		} else {
 			f.fact("Issuer", "self-signed")
 		}
-		f.fact("Valid until", cert.NotAfter.UTC().Format("2006-01-02"))
+		f.fact("Valid until", cert.NotAfter.UTC().Format(time.RFC3339))
 		if u := keyUsage(cert.KeyUsage); u != "" {
 			f.fact("Key usage", u)
 		}

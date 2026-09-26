@@ -87,6 +87,20 @@ export function downloadJSON(data, name) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+// downloadCBOM asks the server to express a report as a CycloneDX 1.6 CBOM.
+export async function downloadCBOM(kind, report, name, btn) {
+  const label = btn.textContent;
+  btn.textContent = 'Preparing…';
+  try {
+    const resp = await postJSON('api/cbom', { kind, report });
+    downloadJSON(await resp.json(), name);
+    btn.textContent = label;
+  } catch (err) {
+    btn.textContent = 'CBOM failed';
+    setTimeout(() => { btn.textContent = label; }, 2500);
+  }
+}
+
 export function announce(msg) { $('announcer').textContent = msg; }
 
 export function showFormError(id, msg) {

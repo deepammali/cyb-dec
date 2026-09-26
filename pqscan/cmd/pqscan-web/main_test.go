@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"io"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -338,6 +339,8 @@ func postParts(t *testing.T, url string, parts map[string][]byte) *http.Response
 }
 
 func TestObserveUpload(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
 	srv := testServer(t, false)
 	resp := postParts(t, srv.URL+"/api/observe", map[string][]byte{"capture": wireguardPcap()})
 	var r struct {
@@ -352,6 +355,9 @@ func TestObserveUpload(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 200 || r.Packets != 1 || r.Verdict != "not_ready" || len(r.Groups) != 1 || r.Groups[0].Protocol != "WireGuard" {
 		t.Fatalf("status %d, report %+v", resp.StatusCode, r)
+	}
+	if left, _ := os.ReadDir(tmp); len(left) != 0 {
+		t.Fatalf("capture upload left files in TMPDIR: %v", left)
 	}
 	for name, parts := range map[string]map[string][]byte{
 		"not a capture": {"capture": []byte("hello")},
@@ -368,5 +374,35 @@ func TestObserveUpload(t *testing.T) {
 	big.Body.Close()
 	if big.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Errorf("oversized capture: status %d, want 413", big.StatusCode)
+	}
+}
+
+// A report the page already has converts to a CycloneDX 1.6 CBOM.
+func TestCBOM(t *testing.T) {
+	srv := testServer(t, false)
+	resp := upload(t, srv.URL+"/api/inspect", map[string][]byte{"a.age": []byte("age-encryption.org/v1\n-> X25519 dGVzdA\nYm9keQ\n--- bWFj\n\x00")})
+	report, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	body := `{"kind":"files","report":` + string(report) + `}`
+	resp, err := http.Post(srv.URL+"/api/cbom", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bom struct {
+		BOMFormat   string `json:"bomFormat"`
+		SpecVersion string `json:"specVersion"`
+		Components  []struct {
+			Name string `json:"name"`
+		} `json:"components"`
+	}
+	json.NewDecoder(resp.Body).Decode(&bom)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || bom.BOMFormat != "CycloneDX" || bom.SpecVersion != "1.6" || len(bom.Components) < 3 {
+		t.Fatalf("status %d, bom %+v", resp.StatusCode, bom)
+	}
+	bad, _ := http.Post(srv.URL+"/api/cbom", "application/json", strings.NewReader(`{"kind":"nope","report":{}}`))
+	bad.Body.Close()
+	if bad.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unknown kind: status %d", bad.StatusCode)
 	}
 }

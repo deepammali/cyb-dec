@@ -22,6 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"pqscan/internal/cbom"
 	"pqscan/internal/probe"
 	"pqscan/internal/report"
 	"pqscan/internal/safety"
@@ -49,6 +50,7 @@ func main() {
 	maxHosts := flag.Int("max-hosts", 256, "cap on hosts a target list (CIDRs included) may expand to")
 	samples := flag.Int("samples", services.DefaultSamples, "repeat the decisive ML-KEM offer this many times per TLS service (reveals mixed pools)")
 	maxAddrs := flag.Int("max-addresses", services.DefaultMaxAddresses, "probe up to this many addresses per name (reveals mixed fleets)")
+	cbomOut := flag.String("cbom", "", "also write a CycloneDX 1.6 CBOM (cryptography bill of materials) to this file ('-' for stdout)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: pqscan [probe] [flags] <host | host:port>\n       pqscan [probe] [flags] --targets <file>\n       pqscan inspect [flags] <path>...\n       pqscan observe [flags] <capture>...\n\nChecks whether services use post-quantum key exchange (ML-KEM).\n\nflags:\n")
 		flag.PrintDefaults()
@@ -77,7 +79,7 @@ func main() {
 			flag.Usage()
 			os.Exit(2)
 		}
-		os.Exit(runEstate(*targets, *maxHosts, *svcList, *protocol, *reference, *jsonOut, opts))
+		os.Exit(runEstate(*targets, *maxHosts, *svcList, *protocol, *reference, *jsonOut, *cbomOut, opts))
 	}
 	if flag.NArg() != 1 {
 		flag.Usage()
@@ -130,6 +132,9 @@ func main() {
 	} else {
 		printHuman(hr, time.Since(start))
 	}
+	if !writeCBOM(*cbomOut, func(b *cbom.Builder) { b.AddHost(hr) }) {
+		os.Exit(2)
+	}
 
 	os.Exit(exitCode(hr.Verdict))
 }
@@ -145,7 +150,7 @@ func exitCode(v report.Verdict) int {
 }
 
 // runEstate scans every target in a list and prints (or emits) the estate report.
-func runEstate(path string, maxHosts int, svcList, protocol, reference string, jsonOut bool, opts services.Options) int {
+func runEstate(path string, maxHosts int, svcList, protocol, reference string, jsonOut bool, cbomOut string, opts services.Options) int {
 	in := os.Stdin
 	if path != "-" {
 		f, err := os.Open(path)
@@ -194,7 +199,36 @@ func runEstate(path string, maxHosts int, svcList, protocol, reference string, j
 	} else {
 		printEstate(er, time.Since(start))
 	}
+	if !writeCBOM(cbomOut, func(b *cbom.Builder) { b.AddEstate(er) }) {
+		return 2
+	}
 	return exitCode(er.Verdict)
+}
+
+// writeCBOM writes a CycloneDX 1.6 CBOM when path is set; false means it failed.
+func writeCBOM(path string, fill func(*cbom.Builder)) bool {
+	if path == "" {
+		return true
+	}
+	b := cbom.NewBuilder()
+	fill(b)
+	doc := b.BOM()
+	data, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: CBOM:", err)
+		return false
+	}
+	data = append(data, '\n')
+	if path == "-" {
+		os.Stdout.Write(data)
+		return true
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, "error: CBOM:", err)
+		return false
+	}
+	fmt.Fprintf(os.Stderr, "CBOM (CycloneDX 1.6, %d components) written to %s\n", len(doc.Components), path)
+	return true
 }
 
 func printEstate(er report.EstateReport, elapsed time.Duration) {
@@ -369,7 +403,7 @@ func printHuman(hr report.HostReport, elapsed time.Duration) {
 					line += " · cert CN=" + s.CertSubject
 				}
 				if s.CertSigAlg != "" {
-					line += fmt.Sprintf(" (%s, expires %s)", s.CertSigAlg, s.CertNotAfter)
+					line += fmt.Sprintf(" (%s, expires %.10s)", s.CertSigAlg, s.CertNotAfter)
 				}
 				fmt.Println(line)
 			}

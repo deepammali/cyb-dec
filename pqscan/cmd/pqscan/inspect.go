@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"pqscan/internal/cbom"
 	"pqscan/internal/inspect"
 )
 
@@ -28,6 +29,7 @@ func runInspect(args []string) int {
 	verbose := fs.Bool("v", false, "print the evidence for every finding, not only the ones that need action")
 	maxFile := fs.Int64("max-file", inspect.DefaultMaxFileSize>>20, "MiB read from any one file or archive member; larger files are read head-only")
 	maxDepth := fs.Int("max-depth", inspect.DefaultMaxDepth, "archive and mail nesting depth")
+	cbomOut := fs.String("cbom", "", "also write a CycloneDX 1.6 CBOM to this file ('-' for stdout)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: pqscan inspect [flags] <path>...\n\n"+
 			"Finds encrypted data, keys, and certificates in files, archives (zip, tar, gzip,\n"+
@@ -53,9 +55,12 @@ func runInspect(args []string) int {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		enc.Encode(r)
-		return exitCode(r.Verdict)
+	} else {
+		printInspect(r, time.Since(start), *verbose)
 	}
-	printInspect(r, time.Since(start), *verbose)
+	if !writeCBOM(*cbomOut, func(b *cbom.Builder) { b.AddInspect(r) }) {
+		return 2
+	}
 	return exitCode(r.Verdict)
 }
 

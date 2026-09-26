@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"pqscan/internal/cbom"
 	"pqscan/internal/inspect"
 	"pqscan/internal/observe"
 )
@@ -27,6 +28,7 @@ func runObserve(args []string) int {
 	jsonOut := fs.Bool("json", false, "emit the JSON report")
 	verbose := fs.Bool("v", false, "print the evidence for every connection, not only the ones that need action")
 	keylog := fs.String("keylog", "", "SSLKEYLOGFILE-format key log: decrypts the TLS 1.3 sessions it has secrets for")
+	cbomOut := fs.String("cbom", "", "also write a CycloneDX 1.6 CBOM to this file ('-' for stdout)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: pqscan observe [flags] <capture.pcap|.pcapng>...\n\n"+
 			"Reads packet captures (tcpdump -w, Wireshark) and reports how every connection\n"+
@@ -77,9 +79,12 @@ func runObserve(args []string) int {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		enc.Encode(r)
-		return exitCode(r.Verdict)
+	} else {
+		printObserve(r, time.Since(start), *verbose)
 	}
-	printObserve(r, time.Since(start), *verbose)
+	if !writeCBOM(*cbomOut, func(b *cbom.Builder) { b.AddObserve(r) }) {
+		return 2
+	}
 	return exitCode(r.Verdict)
 }
 
