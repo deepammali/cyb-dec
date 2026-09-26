@@ -1,9 +1,11 @@
-// Command pqscan checks whether a host's secure services use post-quantum key
-// exchange (ML-KEM), from the command line.
+// Command pqscan checks whether services use post-quantum key exchange
+// (ML-KEM), and whether data at rest is exposed to harvest-now-decrypt-later.
 //
 //	pqscan mail.corp.local                 # every service in the catalog
 //	pqscan --services mail,web example.com # role presets or service names
 //	pqscan 10.0.0.5:2222                   # one port, protocol auto-detected
+//	pqscan --targets estate.txt            # many hosts, host:ports, and CIDRs
+//	pqscan inspect /srv/backups ~/.ssh     # files, archives, and mail at rest
 //	pqscan --json host
 package main
 
@@ -26,6 +28,14 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "inspect":
+			os.Exit(runInspect(os.Args[2:]))
+		case "probe":
+			os.Args = append(os.Args[:1], os.Args[2:]...)
+		}
+	}
 	jsonOut := flag.Bool("json", false, "emit the JSON report")
 	svcList := flag.String("services", "", "service names or presets (web, mail, remote, data, infra, all); default: all")
 	protocol := flag.String("protocol", "auto", "for host:port targets: auto, tls, ssh, smtp, imap, pop3, ftp, postgres")
@@ -37,7 +47,7 @@ func main() {
 	samples := flag.Int("samples", services.DefaultSamples, "repeat the decisive ML-KEM offer this many times per TLS service (reveals mixed pools)")
 	maxAddrs := flag.Int("max-addresses", services.DefaultMaxAddresses, "probe up to this many addresses per name (reveals mixed fleets)")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: pqscan [flags] <host | host:port>\n       pqscan [flags] --targets <file>\n\nChecks whether services use post-quantum key exchange (ML-KEM).\n\nflags:\n")
+		fmt.Fprintf(os.Stderr, "usage: pqscan [probe] [flags] <host | host:port>\n       pqscan [probe] [flags] --targets <file>\n       pqscan inspect [flags] <path>...\n\nChecks whether services use post-quantum key exchange (ML-KEM).\n\nflags:\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -403,7 +413,11 @@ func printRecommendations(recs []report.Recommendation) {
 			fmt.Printf("  %s\n", strings.ToUpper(string(r.Priority)))
 			last = r.Priority
 		}
-		fmt.Printf("  %2d. %s   [%s]\n", n+1, r.Title, strings.Join(r.Services, ", "))
+		affected := r.Services
+		if len(affected) > 6 {
+			affected = append(append([]string{}, affected[:5]...), fmt.Sprintf("and %d more", len(r.Services)-5))
+		}
+		fmt.Printf("  %2d. %s   [%s]\n", n+1, r.Title, strings.Join(affected, ", "))
 		fmt.Printf("      %s\n", wrap(r.Why, 74, "      "))
 		for _, st := range r.Steps {
 			fmt.Printf("      - %s\n", wrap(st, 72, "        "))

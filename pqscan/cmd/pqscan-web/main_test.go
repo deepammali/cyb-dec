@@ -2,10 +2,14 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -70,7 +74,7 @@ func TestEstateStream(t *testing.T) {
 func testServer(t *testing.T, publicOnly bool) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(newMux(config{publicOnly: publicOnly, timeout: 3 * time.Second, limiter: safety.NewRateLimiter(100, time.Minute),
-		opts: services.Options{Timeout: 3 * time.Second}, maxHosts: 16, controls: probe.RunControls()}))
+		opts: services.Options{Timeout: 3 * time.Second}, maxHosts: 16, maxUpload: 1 << 20, controls: probe.RunControls()}))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -234,5 +238,70 @@ func TestServesUI(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET / = %d", resp.StatusCode)
+	}
+}
+
+func upload(t *testing.T, url string, files map[string][]byte) *http.Response {
+	t.Helper()
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	for name, data := range files {
+		h := textproto.MIMEHeader{}
+		h.Set("Content-Disposition", `form-data; name="file"; filename="`+name+`"`)
+		h.Set("Content-Type", "application/octet-stream")
+		w, _ := mw.CreatePart(h)
+		w.Write(data)
+	}
+	mw.Close()
+	resp, err := http.Post(url, mw.FormDataContentType(), &body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+// Uploaded files are inspected in memory: folder paths are kept as labels and
+// nothing lands in the temporary directory.
+func TestInspectUpload(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	srv := testServer(t, false)
+	age := []byte("age-encryption.org/v1\n-> X25519 dGVzdA\nYm9keQ\n--- bWFj\n\x00payload")
+	resp := upload(t, srv.URL+"/api/inspect", map[string][]byte{
+		"backup/secret.age": age,
+		"notes.txt":         []byte("nothing here\n"),
+	})
+	defer resp.Body.Close()
+	var r struct {
+		Files    int    `json:"files"`
+		Verdict  string `json:"verdict"`
+		Findings []struct {
+			Path  string `json:"path"`
+			Class string `json:"class"`
+		} `json:"findings"`
+		Recommendations []struct {
+			ID string `json:"id"`
+		} `json:"recommendations"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 || r.Files != 2 || r.Verdict != "not_ready" || len(r.Findings) != 1 ||
+		r.Findings[0].Path != "backup/secret.age" || r.Findings[0].Class != "exposed" || r.Recommendations[0].ID != "reencrypt-pq" {
+		t.Fatalf("status %d, report %+v", resp.StatusCode, r)
+	}
+	if left, _ := os.ReadDir(tmp); len(left) != 0 {
+		t.Fatalf("upload left files in TMPDIR: %v", left)
+	}
+
+	big := upload(t, srv.URL+"/api/inspect", map[string][]byte{"big.bin": make([]byte, 2<<20)})
+	big.Body.Close()
+	if big.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized upload: status %d, want 413", big.StatusCode)
+	}
+	none := upload(t, srv.URL+"/api/inspect", nil)
+	none.Body.Close()
+	if none.StatusCode != http.StatusBadRequest {
+		t.Fatalf("empty upload: status %d, want 400", none.StatusCode)
 	}
 }

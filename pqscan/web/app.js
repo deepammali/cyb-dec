@@ -1,8 +1,57 @@
-// pqscan web UI entry point.
-import { showFormError } from './core.js';
+// pqscan web UI entry point: tabs, then each view.
+import { $, showFormError } from './core.js';
 import { initHosts } from './hosts.js';
+import { initFiles } from './files.js';
+
+const TABS = {
+  hosts: {
+    title: 'Check a host for post-quantum key exchange',
+    lede: 'pqscan offers ML-KEM in real handshakes and reports what each server actually chooses, with the evidence behind every result.',
+    how: '#how', howLabel: "How it's tested",
+  },
+  files: {
+    title: 'Check data at rest for quantum exposure',
+    lede: 'pqscan reads the headers that encrypted files, keys, and certificates declare, and shows which data a future quantum computer could decrypt from a copy taken today.',
+    how: '#files-how', howLabel: 'How files are inspected',
+  },
+};
+
+function selectTab(name, focus) {
+  for (const key of Object.keys(TABS)) {
+    const on = key === name;
+    const tab = $(`tab-${key}`);
+    tab.setAttribute('aria-selected', String(on));
+    tab.tabIndex = on ? 0 : -1;
+    $(`panel-${key}`).hidden = !on;
+  }
+  const t = TABS[name];
+  $('intro-title').textContent = t.title;
+  $('intro-lede').textContent = t.lede;
+  $('how-link').textContent = t.howLabel;
+  $('how-link').href = t.how;
+  if (name === 'files') history.replaceState(null, '', '#files');
+  else if (location.hash === '#files') history.replaceState(null, '', location.pathname + location.search);
+  if (focus) $(`tab-${name}`).focus();
+}
+
+function initTabs() {
+  const names = Object.keys(TABS);
+  for (const name of names) {
+    const tab = $(`tab-${name}`);
+    tab.addEventListener('click', () => selectTab(name));
+    tab.addEventListener('keydown', (e) => {
+      const i = names.indexOf(name);
+      const next = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: names.length - 1 }[e.key];
+      if (next === undefined) return;
+      e.preventDefault();
+      selectTab(names[(next + names.length) % names.length], true);
+    });
+  }
+  selectTab(location.hash === '#files' ? 'files' : 'hosts');
+}
 
 (async function boot() {
+  initTabs();
   let catalog;
   try {
     const resp = await fetch('api/catalog');
@@ -13,4 +62,5 @@ import { initHosts } from './hosts.js';
     return;
   }
   initHosts(catalog);
+  initFiles(catalog);
 })();

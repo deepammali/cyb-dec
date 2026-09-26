@@ -1,7 +1,8 @@
 # pqscan — post-quantum readiness scanner
 
 `pqscan` tells you whether a host's secure services use **post-quantum key
-exchange** (ML-KEM), and shows the evidence for every result. It offers the
+exchange** (ML-KEM), and whether your **data at rest** is encrypted in a way a
+future quantum computer could break, with the evidence for every result. It offers the
 post-quantum hybrid groups in real handshakes and reports what each server actually
 chooses. This is the defense against **Harvest-Now-Decrypt-Later (HNDL)**, where an
 attacker records encrypted traffic today and decrypts it once quantum computers can
@@ -20,6 +21,7 @@ go run ./cmd/pqscan --services mail,web example.com  # role presets or service n
 go run ./cmd/pqscan 10.0.0.5:2222                    # one port, protocol auto-detected
 go run ./cmd/pqscan --targets estate.txt             # an estate: hosts, host:port, URLs, CIDRs
 go run ./cmd/pqscan --json host                      # machine-readable report
+go run ./cmd/pqscan inspect /srv/backups ~/.ssh      # data at rest: files, archives, mail
 go run ./cmd/pqscan --selftest                       # run the engine controls and exit
 
 # Web app (UI + JSON API)
@@ -40,6 +42,7 @@ Useful flags (CLI and web):
 | `--max-hosts 256` | Cap on hosts a target list may expand to, CIDRs included. A larger list is refused before anything is probed. |
 | `--max-addresses 8` | Probe up to this many of the addresses a name resolves to. |
 | `--samples 3` | Repeat the decisive ML-KEM offer this many times per TLS service to reveal mixed load-balanced pools. |
+| `--max-upload 200` (web) | MB accepted per file-inspection upload. Uploads are held in memory and never written to disk. |
 
 ## What it checks
 
@@ -138,6 +141,53 @@ edge only, and the hops behind it need their own scan.
 Every result is valid for the addresses and port shown, from this scanner, at scan
 time.
 
+## Data at rest: `pqscan inspect`
+
+A handshake scan can't see data that is already stored: backups, archives, mail,
+tokens in logs, key stores. `pqscan inspect` covers it with one rule:
+
+> Data is exposed to harvest-now-decrypt-later exactly when the key that decrypts
+> it was established or wrapped with a classical public-key algorithm (RSA, ECDH,
+> X25519, ElGamal).
+
+A copy taken today can then be opened once a quantum computer breaks that
+algorithm, however strong the content cipher is. Encrypted formats declare in
+cleartext how their data key is protected, because the recipient needs that to
+decrypt, so pqscan reads **headers only**. It never decrypts, never asks for a
+password, and never reports key material, token contents, or mail subjects,
+addresses, or bodies.
+
+```sh
+pqscan inspect /srv/backups /home ~/.ssh      # directories are walked; symlinks are not followed
+pqscan inspect -v --json mail/INBOX > out.json
+```
+
+| Format | What is read | Result |
+|---|---|---|
+| OpenPGP (binary, armored) | PKESK/SKESK packets, the data packet (SEIPD v1/v2, LibrePGP OCB, legacy SED), key packets with sizes, curves, and fingerprints | Any RSA/ECDH/X25519/X448/ElGamal recipient → **exposed**; only ML-KEM recipients (RFC 9980 IDs 35/36) → **post-quantum**; password only → **symmetric**; CAST5/3DES/IDEA or no integrity → **weak** |
+| S/MIME, CMS (`.p7m`, mail parts, PEM) | RecipientInfos, content cipher, signer algorithms | Key transport (RSA) or key agreement (ECDH) → **exposed**; KEMRecipientInfo (RFC 9629) with ML-KEM → **post-quantum**; KEK or password → **symmetric** |
+| age | Recipient stanzas | `X25519`, `ssh-rsa`, `ssh-ed25519`, `p256tag`, `piv-p256` → **exposed**; `mlkem768x25519`, `mlkem768p256tag` → **post-quantum**; `scrypt` → **symmetric** |
+| JWE and JWT (in any text: logs, configs) | Each token's protected header only; tokens are aggregated per file and never shown | `RSA-OAEP*`, `ECDH-ES*` → **exposed**; `dir`, `A*KW`, `PBES2*` → **symmetric**; signed JWTs → signature inventory |
+| SOPS | The recipients wrapping the data key | age X25519, OpenPGP, or Azure Key Vault (RSA) → **exposed**; AWS/GCP KMS or Vault transit only → **symmetric** |
+| Keys and certificates | X.509, CSRs, PKCS#8 (plain and encrypted), PKCS#1, SEC 1, PKCS#12, JKS/JCEKS, OpenSSH keys, `authorized_keys`, `known_hosts`, age identities and recipients | Classical keys → **inventory** (Plan); encryption keys (RSA key transport, X25519, ECDH) are flagged first; ML-KEM/ML-DSA/SLH-DSA OIDs → **post-quantum**; RC2/3DES PBE, JKS, legacy PEM encryption → **weak** |
+| Symmetric containers | LUKS1/LUKS2, KeePass KDBX 3/4, ZIP encryption, Ansible Vault, `openssl enc` | **Symmetric**; ZipCrypto → **weak**; AES-128 → Harden where CNSA 2.0 applies |
+
+Archives (zip, tar, gzip, bzip2) and mail (`.eml`, mbox, Maildir files, MIME
+parts, attachments) are opened and searched inside, with limits: `--max-file`
+(MiB read per file or member; larger files are read head-only, which covers every
+header format), `--max-depth` for nesting, and a total decompressed-bytes budget
+against archive bombs. Every finding lists the path (with `!member` inside
+archives and `#message N/part M` inside mail), the interpreted header fields,
+a confidence (confirmed when the header was parsed per its specification), and
+its limits. Recommendations follow from the findings: re-encrypt exposed data to
+post-quantum recipients (age `-pq`, OpenPGP RFC 9980 keys) or to symmetric KMS
+wrapping, replace weak protection, stop encrypting to classical keys, and plan the
+signing-key migration.
+
+**What it can't see.** A container encrypted with a password shows only the
+algorithms it declares; nothing inside is opened. Encryption inside databases and
+applications isn't visible from their files.
+
 ## Recommendations
 
 Each scan produces prioritized recommendations derived from its evidence, with exact
@@ -162,7 +212,12 @@ versions and copyable configuration:
 
 ## Web UI and API
 
-The web UI does the following:
+The web UI has two tabs: **Hosts** (services and connections) and **Files** (data
+at rest). In the Files tab you drop files or whole folders; they are uploaded to
+this pqscan server only, parsed in memory, and never written to disk (the server
+never reads its own filesystem by path, so path scanning stays in the CLI).
+
+The Hosts tab does the following:
 - Scans one host, or a target list (hosts, `host:port`, URLs, CIDRs) with an estate
   summary: a hosts table that expands into each host's services, and recommendations
   aggregated across hosts.
@@ -184,6 +239,9 @@ API endpoints:
   the target-list text; lists over `--max-hosts` are refused with 400.
 - `POST /api/estate/rollup {targets, hosts}`: the estate summary for a stopped estate
   scan.
+- `POST /api/inspect` (multipart/form-data, one `file` part per file; the filename
+  may carry a relative path): the data-at-rest report. Uploads over `--max-upload`
+  are refused with 413.
 
 ### Future work (not yet implemented)
 

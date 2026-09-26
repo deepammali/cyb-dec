@@ -7,7 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
+	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"strings"
@@ -16,6 +19,7 @@ import (
 
 	webui "pqscan/web"
 
+	"pqscan/internal/inspect"
 	"pqscan/internal/probe"
 	"pqscan/internal/report"
 	"pqscan/internal/safety"
@@ -26,7 +30,8 @@ type config struct {
 	publicOnly bool          // refuse private/internal targets (for internet-facing deployments)
 	timeout    time.Duration // per-probe timeout
 	opts       services.Options
-	maxHosts   int // cap on an estate target list
+	maxHosts   int   // cap on an estate target list
+	maxUpload  int64 // bytes accepted per /api/inspect request
 	limiter    *safety.RateLimiter
 	controls   []probe.Control // engine calibration, run once at startup
 	reference  string          // known ML-KEM server for the network-path check; empty = off
@@ -72,6 +77,7 @@ func main() {
 	maxHosts := flag.Int("max-hosts", 256, "cap on hosts an estate target list (CIDRs included) may expand to")
 	samples := flag.Int("samples", services.DefaultSamples, "repeat the decisive ML-KEM offer this many times per TLS service (reveals mixed pools)")
 	maxAddrs := flag.Int("max-addresses", services.DefaultMaxAddresses, "probe up to this many addresses per name (reveals mixed fleets)")
+	maxUpload := flag.Int64("max-upload", 200, "MB accepted per file-inspection upload (held in memory, never written to disk)")
 	flag.Parse()
 
 	controls := probe.RunControls()
@@ -93,7 +99,7 @@ func main() {
 		Handler: newMux(config{
 			publicOnly: *publicOnly, timeout: *timeout, limiter: safety.NewRateLimiter(30, time.Minute),
 			opts:     services.Options{Timeout: *timeout, Samples: *samples, MaxAddresses: *maxAddrs},
-			maxHosts: *maxHosts, controls: controls, reference: *reference, path: &pathCache{},
+			maxHosts: *maxHosts, maxUpload: *maxUpload << 20, controls: controls, reference: *reference, path: &pathCache{},
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
@@ -116,7 +122,55 @@ func newMux(cfg config) http.Handler {
 			"controls":   cfg.controls,
 			"reference":  cfg.reference,
 			"maxHosts":   cfg.maxHosts,
+			"maxUpload":  cfg.maxUpload,
 		})
+	})
+
+	// Inspect uploaded files. Parts are read one at a time into memory and
+	// parsed there: nothing is written to disk (ParseMultipartForm would spill
+	// large uploads to temporary files, so it is never used), and the server
+	// never reads its own filesystem by path.
+	mux.HandleFunc("POST /api/inspect", func(w http.ResponseWriter, r *http.Request) {
+		if !cfg.limiter.Allow(clientIP(r)) {
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate limit exceeded, try again shortly"})
+			return
+		}
+		rc := http.NewResponseController(w)
+		rc.SetReadDeadline(time.Now().Add(30 * time.Minute)) // large uploads over slow links
+		rc.SetWriteDeadline(time.Now().Add(35 * time.Minute))
+		r.Body = http.MaxBytesReader(w, r.Body, cfg.maxUpload)
+		mr, err := r.MultipartReader()
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "expected a multipart/form-data upload"})
+			return
+		}
+		in := inspect.New(r.Context(), inspect.Options{MaxFileSize: cfg.maxUpload}, nil)
+		files := 0
+		for {
+			part, err := mr.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				uploadError(w, err, cfg.maxUpload)
+				return
+			}
+			if part.FormName() != "file" {
+				continue
+			}
+			data, err := io.ReadAll(part)
+			if err != nil {
+				uploadError(w, err, cfg.maxUpload)
+				return
+			}
+			in.Bytes(uploadName(part.Header.Get("Content-Disposition"), files), data)
+			files++
+		}
+		if files == 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no files were uploaded"})
+			return
+		}
+		writeJSON(w, http.StatusOK, in.Report())
 	})
 
 	mux.HandleFunc("POST /api/scan", func(w http.ResponseWriter, r *http.Request) {
@@ -236,6 +290,38 @@ func newMux(cfg config) http.Handler {
 	})
 
 	return securityHeaders(mux)
+}
+
+func uploadError(w http.ResponseWriter, err error, limit int64) {
+	var tooBig *http.MaxBytesError
+	if errors.As(err, &tooBig) {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": fmt.Sprintf("upload exceeds %d MB; inspect fewer files at once or raise --max-upload", limit>>20)})
+		return
+	}
+	writeJSON(w, http.StatusBadRequest, map[string]string{"error": "upload failed: " + err.Error()})
+}
+
+// uploadName is the display name of an uploaded file: the browser's relative
+// path (folder uploads keep their structure). It is a label only, never a path
+// on this server.
+func uploadName(disposition string, n int) string {
+	name := ""
+	if _, params, err := mime.ParseMediaType(disposition); err == nil {
+		name = params["filename"]
+	}
+	name = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, name)
+	if len(name) > 512 {
+		name = name[len(name)-512:]
+	}
+	if name == "" {
+		name = fmt.Sprintf("upload %d", n+1)
+	}
+	return name
 }
 
 // ndjson prepares a streaming NDJSON response; send writes one event and flushes.

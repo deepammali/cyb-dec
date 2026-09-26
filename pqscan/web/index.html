@@ -9,20 +9,28 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <a class="skip" href="#host">Skip to scan</a>
+  <a class="skip" href="#tabs">Skip to the scanner</a>
   <header class="topbar">
     <div class="wrap topbar-inner">
       <a class="brand" href="./">pqscan</a>
-      <nav><a href="#how">How it's tested</a></nav>
+      <nav><a id="how-link" href="#how">How it's tested</a></nav>
     </div>
   </header>
 
   <main class="wrap">
     <section class="intro">
-      <h1>Check a host for post-quantum key exchange</h1>
-      <p class="lede">pqscan offers ML-KEM in real handshakes and reports what each server actually chooses, with the evidence behind every result.</p>
+      <h1 id="intro-title">Check a host for post-quantum key exchange</h1>
+      <p class="lede" id="intro-lede">pqscan offers ML-KEM in real handshakes and reports what each server actually chooses, with the evidence behind every result.</p>
     </section>
 
+    <div class="tabs" id="tabs" role="tablist" aria-label="What to check">
+      <button type="button" role="tab" id="tab-hosts" aria-controls="panel-hosts" aria-selected="true">Hosts <span class="tab-sub">in transit</span></button>
+      <button type="button" role="tab" id="tab-files" aria-controls="panel-files" aria-selected="false" tabindex="-1">Files <span class="tab-sub">at rest</span></button>
+    </div>
+
+    <div id="announcer" class="sr-only" aria-live="polite"></div>
+
+    <div id="panel-hosts" role="tabpanel" aria-labelledby="tab-hosts">
     <form id="scan-form" autocomplete="off" novalidate>
       <fieldset class="mode">
         <legend class="sr-only">What to scan</legend>
@@ -64,8 +72,6 @@
       <p id="form-error" class="form-error" role="alert" hidden></p>
       <p class="hint">Scan only systems you are authorized to test.</p>
     </form>
-
-    <div id="announcer" class="sr-only" aria-live="polite"></div>
 
     <section id="report" class="report" hidden>
       <div id="verdict" class="verdict"></div>
@@ -134,6 +140,66 @@
       </div>
       <p class="prose small">Every result is valid for the addresses and port shown, as reached from this scanner at scan time. A TLS-inspecting proxy on the scanner's own network path can change results; the network path check detects that.</p>
     </section>
+    </div>
+
+    <div id="panel-files" role="tabpanel" aria-labelledby="tab-files" hidden>
+      <form id="files-form" autocomplete="off" novalidate>
+        <div id="dropzone" class="dropzone">
+          <p class="drop-title">Drop files or folders here</p>
+          <p class="drop-sub">Archives (zip, tar, gzip, bzip2) and mail (eml, mbox) are opened and searched inside.</p>
+          <div class="pick-row">
+            <label class="ghost pick"><input id="file-pick" type="file" multiple class="sr-only">Choose files</label>
+            <label class="ghost pick"><input id="dir-pick" type="file" webkitdirectory multiple class="sr-only">Choose a folder</label>
+          </div>
+        </div>
+        <div class="selection-row">
+          <p id="selection" class="selection" aria-live="polite"></p>
+          <button id="files-clear" type="button" class="link" hidden>Clear</button>
+        </div>
+        <div class="files-actions">
+          <button id="files-go" type="submit" class="primary" disabled>Inspect</button>
+          <button id="files-stop" type="button" class="secondary" hidden>Stop</button>
+          <span id="files-limit" class="field-note"></span>
+        </div>
+        <div id="files-progress" class="progress" hidden>
+          <div class="bar" role="progressbar" aria-label="Upload" aria-valuemin="0" aria-valuemax="100"><span class="fill"></span></div>
+          <span class="progress-text"></span>
+        </div>
+        <p id="files-error" class="form-error" role="alert" hidden></p>
+        <p class="hint">Files go only to this pqscan server. It reads their headers in memory and never writes them to disk: nothing is decrypted and no password is asked for.</p>
+      </form>
+
+      <section id="files-report" class="report" hidden>
+        <div id="files-verdict" class="verdict"></div>
+        <section id="files-list" class="services" aria-labelledby="files-list-title"></section>
+        <details id="files-skipped" class="skipped" hidden></details>
+        <section id="files-recs" class="recs" aria-labelledby="files-recs-title"></section>
+      </section>
+
+      <section id="files-how" class="how" aria-labelledby="files-how-title">
+        <h2 id="files-how-title">How files are inspected</h2>
+        <div class="prose">
+          <p><strong>The rule.</strong> Data is exposed to harvest-now-decrypt-later exactly when the key that decrypts it was established or wrapped with a classical public-key algorithm (RSA, ECDH, X25519, ElGamal). A copy taken today can be opened once a quantum computer breaks that algorithm, however strong the content cipher is. Data protected only by symmetric keys or passwords isn't affected by Shor's algorithm.</p>
+          <p><strong>Why headers are enough.</strong> Encrypted formats declare in cleartext how their data key is protected, because the recipient needs that to decrypt. pqscan reads those declarations and nothing else.</p>
+        </div>
+        <div class="matrix-wrap">
+          <table class="formats">
+            <caption class="sr-only">What pqscan reads in each format</caption>
+            <thead><tr><th scope="col">Format</th><th scope="col">What is read</th><th scope="col">Exposed when</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">OpenPGP</th><td>Recipient packets (PKESK), password packets, data packet, key packets</td><td>Any recipient is RSA, ECDH, X25519, X448, or ElGamal. ML-KEM recipients (RFC 9980) are post-quantum.</td></tr>
+              <tr><th scope="row">S/MIME, CMS</th><td>RecipientInfos and the content cipher</td><td>Key transport (RSA) or key agreement (ECDH). KEMRecipientInfo with ML-KEM is post-quantum.</td></tr>
+              <tr><th scope="row">age</th><td>Recipient stanzas</td><td><code>X25519</code>, <code>ssh-rsa</code>, <code>ssh-ed25519</code>, or <code>p256tag</code>. <code>mlkem768x25519</code> is post-quantum; <code>scrypt</code> is a passphrase.</td></tr>
+              <tr><th scope="row">JWE, JWT</th><td>Each token's protected header</td><td><code>RSA-OAEP*</code> or <code>ECDH-ES*</code> key management. Signed JWTs are signature inventory.</td></tr>
+              <tr><th scope="row">SOPS</th><td>The recipients wrapping the data key</td><td>An age X25519, OpenPGP, or Azure Key Vault (RSA) recipient. AWS/GCP KMS and Vault transit are symmetric.</td></tr>
+              <tr><th scope="row">Keys, certificates</th><td>X.509, PKCS#8, PKCS#12, JKS, OpenSSH, authorized_keys, age keys</td><td>Classical keys are migration inventory. Encryption keys (RSA key transport, X25519, ECDH) come first, because data encrypted to them is exposed.</td></tr>
+              <tr><th scope="row">Containers</th><td>LUKS, KeePass, ZIP encryption, Ansible Vault, openssl enc</td><td>Symmetric only. ZipCrypto, 3DES, RC2, and JKS key protection are weak today.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="prose small"><strong>Limits.</strong> A container encrypted with a password shows only the algorithms it declares; what is inside isn't opened. Encryption inside databases and applications isn't visible from their files. Files over the per-file limit are read head-only, which covers every header format above.</p>
+      </section>
+    </div>
   </main>
 
   <footer class="wrap footer">
