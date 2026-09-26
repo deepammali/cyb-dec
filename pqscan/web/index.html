@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>pqscan</title>
+  <meta name="description" content="Check whether a host's services use post-quantum key exchange (ML-KEM), with the evidence behind every result.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230E7C86'/%3E%3Cpath d='M9 17l5 5 9-11' stroke='white' stroke-width='3.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <a class="skip" href="#tabs">Skip to the scanner</a>
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <a class="brand" href="./">pqscan</a>
+      <nav><a id="how-link" href="#how">How it's tested</a></nav>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="intro">
+      <h1 id="intro-title">Check a host for post-quantum key exchange</h1>
+      <p class="lede" id="intro-lede">pqscan offers ML-KEM in real handshakes and reports what each server actually chooses, with the evidence behind every result.</p>
+    </section>
+
+    <div class="tabs" id="tabs" role="tablist" aria-label="What to check">
+      <button type="button" role="tab" id="tab-hosts" aria-controls="panel-hosts" aria-selected="true">Hosts <span class="tab-sub">live probe</span></button>
+      <button type="button" role="tab" id="tab-files" aria-controls="panel-files" aria-selected="false" tabindex="-1">Files <span class="tab-sub">at rest</span></button>
+      <button type="button" role="tab" id="tab-capture" aria-controls="panel-capture" aria-selected="false" tabindex="-1">Capture <span class="tab-sub">in transit</span></button>
+    </div>
+
+    <div id="announcer" class="sr-only" aria-live="polite"></div>
+
+    <div id="panel-hosts" role="tabpanel" aria-labelledby="tab-hosts">
+    <form id="scan-form" autocomplete="off" novalidate>
+      <fieldset class="mode">
+        <legend class="sr-only">What to scan</legend>
+        <label><input type="radio" name="mode" value="host" checked><span>One host</span></label>
+        <label><input type="radio" name="mode" value="estate"><span>Target list</span></label>
+      </fieldset>
+      <div class="target-row">
+        <div id="host-row" class="target-field">
+          <label for="host" class="sr-only">Host, IP address, or host:port</label>
+          <input id="host" name="host" type="text" inputmode="url" spellcheck="false" autocapitalize="off"
+                 placeholder="hostname, IP, or host:port" aria-describedby="host-hint">
+        </div>
+        <div id="targets-row" class="target-field" hidden>
+          <label for="targets" class="sr-only">Targets, one per line</label>
+          <textarea id="targets" name="targets" rows="6" spellcheck="false" autocapitalize="off" aria-describedby="targets-hint"
+                    placeholder="mail.corp.local&#10;10.0.0.0/28&#10;vpn.corp.local:8443&#10;# comments are ignored"></textarea>
+        </div>
+        <button id="go" type="submit" class="primary">Scan</button>
+        <button id="stop" type="button" class="secondary" hidden>Stop</button>
+      </div>
+      <p id="host-hint" class="hint">e.g. <code>mail.corp.local</code>, <code>10.0.0.5:2222</code>, <code>[fd00::5]:8443</code></p>
+      <p id="targets-hint" class="hint" hidden>One target per line: a hostname, an IP, <code>host:port</code>, a URL, or a CIDR such as <code>10.0.0.0/28</code>. <span id="targets-note"></span></p>
+
+      <div id="scope-row" class="field">
+        <span id="scope-label" class="field-label">Scope</span>
+        <div id="chips" class="chips" role="group" aria-labelledby="scope-label"></div>
+        <p id="scope-summary" class="field-note" aria-live="polite"></p>
+        <fieldset id="custom" class="custom" hidden>
+          <legend class="sr-only">Choose individual services</legend>
+        </fieldset>
+      </div>
+
+      <div id="protocol-row" class="field" hidden>
+        <label for="protocol" class="field-label">Protocol</label>
+        <select id="protocol"></select>
+        <p id="protocol-note" class="field-note">A port was entered: only that port is probed.</p>
+      </div>
+
+      <p id="form-error" class="form-error" role="alert" hidden></p>
+      <p class="hint">Scan only systems you are authorized to test.</p>
+    </form>
+
+    <section id="report" class="report" hidden>
+      <div id="verdict" class="verdict"></div>
+
+      <details class="meaning">
+        <summary>What this means</summary>
+        <div class="prose">
+          <p><strong>Harvest now, decrypt later.</strong> Anyone who records encrypted traffic today can keep it until a large quantum computer can break the classical key exchange that protected it (X25519, ECDH, RSA). Traffic recorded today can't be protected after the fact, which is why the key exchange is what matters now.</p>
+          <p><strong>Post-quantum key exchange.</strong> <code>X25519MLKEM768</code> combines classical X25519 with ML-KEM-768 (NIST FIPS 203). The connection stays secure as long as either one holds, so it is safe to deploy today.</p>
+          <p><strong>Why not certificates?</strong> A certificate signature only has to resist an attacker during the handshake, so recorded traffic doesn't make it vulnerable later. Moving certificates to ML-DSA is a planning item, not an emergency.</p>
+          <p><strong>What pqscan doesn't check.</strong> Certificate trust and validity, and anything behind the endpoint it reached. When TLS ends at a CDN or proxy, pqscan names it; the hops behind it are separate connections that need their own scan.</p>
+        </div>
+      </details>
+
+      <section id="services" class="services" aria-labelledby="services-title"></section>
+      <section id="recs" class="recs" aria-labelledby="recs-title" hidden></section>
+    </section>
+
+    <section id="how" class="how" aria-labelledby="how-title">
+      <h2 id="how-title">How it's tested</h2>
+      <div class="prose">
+        <p>For each TLS service, pqscan runs two independent checks:</p>
+        <ol>
+          <li><strong>Offer test.</strong> A hand-built ClientHello offers <code>X25519MLKEM768</code> together with classical <code>X25519</code>, with valid keys, the way current browsers do. The server's ServerHello names the group it picked; that is the server's own answer, not an inference. The other ML-KEM groups (<code>SecP256r1MLKEM768</code>, <code>SecP384r1MLKEM1024</code>) are tested the same way.</li>
+          <li><strong>Forced test.</strong> A second, independent TLS client (Go's <code>crypto/tls</code>) completes a full handshake offering <em>only</em> <code>X25519MLKEM768</code>. It completes only if the server really does ML-KEM.</li>
+        </ol>
+        <p>For SSH, the server sends its complete list of key-exchange methods before encryption starts. SSH picks the first method in the client's list that the server supports (RFC 4253 §7.1), so that list is authoritative.</p>
+        <p>Before any result is trusted, four <strong>engine controls</strong> run against local reference servers with known answers: an ML-KEM TLS server must read post-quantum and a classical one must read classical, and likewise for SSH. If a control fails, the web server refuses to start.</p>
+      </div>
+
+      <h3>Could a result be wrong?</h3>
+      <div class="matrix-wrap">
+        <table class="truth">
+          <caption class="sr-only">How pqscan rules out each kind of error</caption>
+          <thead>
+            <tr><th scope="col"></th><th scope="col">Server really uses ML-KEM</th><th scope="col">Server doesn't</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row">pqscan says <span class="tag tag-pq">Post-quantum</span></th>
+              <td class="ok"><strong>True positive</strong></td>
+              <td class="err"><strong>False positive.</strong> Ruled out when the forced test completes, because a server without ML-KEM can't finish that handshake. The negative control rules out a systematic false positive. If the two tests disagree, the result is marked <em>Unverified</em>, not post-quantum.</td>
+            </tr>
+            <tr>
+              <th scope="row">pqscan says <span class="tag tag-classical">Classical</span></th>
+              <td class="err"><strong>False negative.</strong> Ruled out when ML-KEM is offered first with a valid key and the forced test is refused too. The positive control rules out a systematic false negative. One cause can't be seen from the server: a middlebox that strips ML-KEM offers. The <em>network path</em> check (<code>--reference</code>) detects that.</td>
+              <td class="ok"><strong>True negative</strong></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Confidence</h3>
+      <dl class="conf-list">
+        <div><dt><span class="conf conf-confirmed">Confirmed</span></dt><dd>Two independent checks agree, or the protocol makes a single check authoritative (the SSH method list, a refused STARTTLS).</dd></div>
+        <div><dt><span class="conf conf-high">One check</span></dt><dd>The decisive check succeeded but the confirming one couldn't run (for example, a timeout).</dd></div>
+        <div><dt><span class="conf conf-partial">Some clients</span></dt><dd>Post-quantum only with clients that offer the P-256/P-384 hybrids. Browsers get classical key exchange.</dd></div>
+        <div><dt><span class="conf conf-inconsistent">Unverified</span></dt><dd>The checks disagreed, usually because several differently configured servers share one address. Re-scan before relying on it.</dd></div>
+        <div><dt><span class="conf conf-mixed">Mixed</span></dt><dd>Observed directly: some addresses behind the name, or some of the repeated identical offers to one address, got post-quantum key exchange and others didn't. The service counts as not post-quantum until every server is.</dd></div>
+        <div><dt><span class="conf conf-low">Low</span></dt><dd>An engine control failed, or the network path strips ML-KEM, so the result may be wrong.</dd></div>
+      </dl>
+      <h3>Many servers behind one name</h3>
+      <div class="prose">
+        <p>A name can resolve to several addresses, and one address can front a pool of servers. pqscan probes every address a name resolves to (by default up to 8, set with <code>--max-addresses</code>) and repeats the decisive ML-KEM offer 3 times per address (<code>--samples</code>). Addresses that agree are reported as one result; addresses that disagree are listed one by one. If the repeated offers get different answers, the pool is mixed.</p>
+        <p>On HTTPS, pqscan also sends one <code>HEAD</code> request over the finished handshake and reads the response headers for a CDN or proxy (for example <code>Cf-Ray</code>, <code>Via</code>, <code>X-Amz-Cf-Id</code>). If it finds one, the result is valid up to that edge only.</p>
+      </div>
+      <p class="prose small">Every result is valid for the addresses and port shown, as reached from this scanner at scan time. A TLS-inspecting proxy on the scanner's own network path can change results; the network path check detects that.</p>
+    </section>
+    </div>
+
+    <div id="panel-files" role="tabpanel" aria-labelledby="tab-files" hidden>
+      <form id="files-form" autocomplete="off" novalidate>
+        <div id="dropzone" class="dropzone">
+          <p class="drop-title">Drop files or folders here</p>
+          <p class="drop-sub">Archives (zip, tar, gzip, bzip2) and mail (eml, mbox) are opened and searched inside.</p>
+          <div class="pick-row">
+            <label class="ghost pick"><input id="file-pick" type="file" multiple class="sr-only">Choose files</label>
+            <label class="ghost pick"><input id="dir-pick" type="file" webkitdirectory multiple class="sr-only">Choose a folder</label>
+          </div>
+        </div>
+        <div class="selection-row">
+          <p id="selection" class="selection" aria-live="polite"></p>
+          <button id="files-clear" type="button" class="link" hidden>Clear</button>
+        </div>
+        <div class="files-actions">
+          <button id="files-go" type="submit" class="primary" disabled>Inspect</button>
+          <button id="files-stop" type="button" class="secondary" hidden>Stop</button>
+          <span id="files-limit" class="field-note"></span>
+        </div>
+        <div id="files-progress" class="progress" hidden>
+          <div class="bar" role="progressbar" aria-label="Upload" aria-valuemin="0" aria-valuemax="100"><span class="fill"></span></div>
+          <span class="progress-text"></span>
+        </div>
+        <p id="files-error" class="form-error" role="alert" hidden></p>
+        <p class="hint">Files go only to this pqscan server. It reads their headers in memory and never writes them to disk: nothing is decrypted and no password is asked for.</p>
+      </form>
+
+      <section id="files-report" class="report" hidden>
+        <div id="files-verdict" class="verdict"></div>
+        <section id="files-list" class="services" aria-labelledby="files-list-title"></section>
+        <details id="files-skipped" class="skipped" hidden></details>
+        <section id="files-recs" class="recs" aria-labelledby="files-recs-title"></section>
+      </section>
+
+      <section id="files-how" class="how" aria-labelledby="files-how-title">
+        <h2 id="files-how-title">How files are inspected</h2>
+        <div class="prose">
+          <p><strong>The rule.</strong> Data is exposed to harvest-now-decrypt-later exactly when the key that decrypts it was established or wrapped with a classical public-key algorithm (RSA, ECDH, X25519, ElGamal). A copy taken today can be opened once a quantum computer breaks that algorithm, however strong the content cipher is. Data protected only by symmetric keys or passwords isn't affected by Shor's algorithm.</p>
+          <p><strong>Why headers are enough.</strong> Encrypted formats declare in cleartext how their data key is protected, because the recipient needs that to decrypt. pqscan reads those declarations and nothing else.</p>
+        </div>
+        <div class="matrix-wrap">
+          <table class="formats">
+            <caption class="sr-only">What pqscan reads in each format</caption>
+            <thead><tr><th scope="col">Format</th><th scope="col">What is read</th><th scope="col">Exposed when</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">OpenPGP</th><td>Recipient packets (PKESK), password packets, data packet, key packets</td><td>Any recipient is RSA, ECDH, X25519, X448, or ElGamal. ML-KEM recipients (RFC 9980) are post-quantum.</td></tr>
+              <tr><th scope="row">S/MIME, CMS</th><td>RecipientInfos and the content cipher</td><td>Key transport (RSA) or key agreement (ECDH). KEMRecipientInfo with ML-KEM is post-quantum.</td></tr>
+              <tr><th scope="row">age</th><td>Recipient stanzas</td><td><code>X25519</code>, <code>ssh-rsa</code>, <code>ssh-ed25519</code>, or <code>p256tag</code>. <code>mlkem768x25519</code> is post-quantum; <code>scrypt</code> is a passphrase.</td></tr>
+              <tr><th scope="row">JWE, JWT</th><td>Each token's protected header</td><td><code>RSA-OAEP*</code> or <code>ECDH-ES*</code> key management. Signed JWTs are signature inventory.</td></tr>
+              <tr><th scope="row">SOPS</th><td>The recipients wrapping the data key</td><td>An age X25519, OpenPGP, or Azure Key Vault (RSA) recipient. AWS/GCP KMS and Vault transit are symmetric.</td></tr>
+              <tr><th scope="row">Keys, certificates</th><td>X.509, PKCS#8, PKCS#12, JKS, OpenSSH, authorized_keys, age keys</td><td>Classical keys are migration inventory. Encryption keys (RSA key transport, X25519, ECDH) come first, because data encrypted to them is exposed.</td></tr>
+              <tr><th scope="row">Containers</th><td>LUKS, KeePass, ZIP encryption, Ansible Vault, openssl enc</td><td>Symmetric only. ZipCrypto, 3DES, RC2, and JKS key protection are weak today.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="prose small"><strong>Limits.</strong> A container encrypted with a password shows only the algorithms it declares; what is inside isn't opened. Encryption inside databases and applications isn't visible from their files. Files over the per-file limit are read head-only, which covers every header format above.</p>
+      </section>
+    </div>
+
+    <div id="panel-capture" role="tabpanel" aria-labelledby="tab-capture" hidden>
+      <form id="cap-form" autocomplete="off" novalidate>
+        <div id="cap-drop" class="dropzone">
+          <p class="drop-title">Drop a packet capture here</p>
+          <p class="drop-sub">pcap or pcapng from tcpdump, Wireshark, or dumpcap. Add a key log to look inside TLS 1.3 sessions.</p>
+          <div class="pick-row">
+            <label class="ghost pick"><input id="cap-pick" type="file" multiple accept=".pcap,.pcapng,.cap,.dmp" class="sr-only">Choose a capture</label>
+            <label class="ghost pick"><input id="keylog-pick" type="file" class="sr-only">Add a key log (optional)</label>
+          </div>
+        </div>
+        <div class="selection-row">
+          <p id="cap-selection" class="selection" aria-live="polite"></p>
+          <button id="cap-clear" type="button" class="link" hidden>Clear</button>
+        </div>
+        <div class="files-actions">
+          <button id="cap-go" type="submit" class="primary" disabled>Analyze</button>
+          <button id="cap-stop" type="button" class="secondary" hidden>Stop</button>
+          <span id="cap-limit" class="field-note"></span>
+        </div>
+        <div id="cap-progress" class="progress" hidden>
+          <div class="bar" role="progressbar" aria-label="Upload" aria-valuemin="0" aria-valuemax="100"><span class="fill"></span></div>
+          <span class="progress-text"></span>
+        </div>
+        <p id="cap-error" class="form-error" role="alert" hidden></p>
+        <p class="hint">The capture and key log go only to this pqscan server, are processed in memory, and are never stored. Capture with <code>tcpdump -i any -w capture.pcap</code>; get a key log by setting <code>SSLKEYLOGFILE=keys.log</code> for curl, browsers, and most TLS libraries.</p>
+      </form>
+
+      <section id="cap-report" class="report" hidden>
+        <div id="cap-verdict" class="verdict"></div>
+        <section id="cap-list" class="services" aria-labelledby="cap-list-title"></section>
+        <section id="cap-artifacts" class="services" hidden></section>
+        <section id="cap-recs" class="recs" aria-labelledby="cap-recs-title"></section>
+      </section>
+
+      <section id="cap-how" class="how" aria-labelledby="cap-how-title">
+        <h2 id="cap-how-title">How traffic is analyzed</h2>
+        <div class="prose">
+          <p>Every handshake sets up its keys in the clear, so a capture shows what each connection negotiated and what each client offered: including clients a server scan never sees, and internal hops behind proxies and load balancers.</p>
+        </div>
+        <div class="matrix-wrap">
+          <table class="formats">
+            <caption class="sr-only">What pqscan reads for each protocol</caption>
+            <thead><tr><th scope="col">Protocol</th><th scope="col">What is read</th><th scope="col">Post-quantum when</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">TLS over TCP</th><td>ClientHello groups and key shares, ServerHello and HelloRetryRequest; TLS 1.2 ServerKeyExchange and certificate. Works after STARTTLS and PostgreSQL SSLRequest.</td><td>The server selects an ML-KEM group (<code>X25519MLKEM768</code> and the other hybrids). If it doesn't, the report says whether the server declined or the client never offered.</td></tr>
+              <tr><th scope="row">QUIC (HTTP/3)</th><td>Initial packets, whose keys derive from the connection ID in the clear (RFC 9001)</td><td>As for TLS.</td></tr>
+              <tr><th scope="row">SSH</th><td>Both KEXINIT method lists; the method used is the first in the client's list that the server also lists</td><td><code>mlkem768x25519-sha256</code> or <code>sntrup761x25519-sha512</code> is negotiated.</td></tr>
+              <tr><th scope="row">IKEv2 (IPsec)</th><td>IKE_SA_INIT proposals and the responder's choice, including RFC 9370 additional key exchanges</td><td>ML-KEM-512/768/1024 (IDs 35–37) is chosen.</td></tr>
+              <tr><th scope="row">WireGuard</th><td>Handshake messages</td><td>Never on its own: WireGuard uses X25519. A pre-shared key can add a layer, but it isn't visible.</td></tr>
+              <tr><th scope="row">Plaintext</th><td>HTTP, SMTP, IMAP, POP3, FTP, LDAP, Telnet, and PostgreSQL without TLS</td><td>Never: readable today. The data they carry is searched like files.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="prose small"><strong>Inside TLS.</strong> With a key log (<code>SSLKEYLOGFILE</code> format) from your own clients or proxies, TLS 1.3 sessions using AES-GCM are decrypted in memory: the server's certificate and signature become visible, and HTTP messages are searched for encrypted artifacts such as JWE tokens and OpenPGP, S/MIME, or age files. TLS 1.2 and ChaCha20-Poly1305 sessions aren't decrypted in this version.</p>
+        <p class="prose small"><strong>Limits.</strong> Only what the capture contains: a connection captured after its handshake can't be assessed, and one-sided captures show only the client's offer. IP fragments are skipped. QUIC is read from its Initial packets only.</p>
+      </section>
+    </div>
+  </main>
+
+  <footer class="wrap footer">
+    <span>pqscan checks key exchange per <a href="https://datatracker.ietf.org/doc/html/rfc8446">RFC 8446</a>, <a href="https://datatracker.ietf.org/doc/draft-ietf-tls-ecdhe-mlkem/">draft-ietf-tls-ecdhe-mlkem</a>, and <a href="https://doi.org/10.6028/NIST.FIPS.203">FIPS 203</a>. Everything on this page is served by the scanner itself.</span>
+  </footer>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
